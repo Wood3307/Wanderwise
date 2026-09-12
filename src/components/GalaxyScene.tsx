@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import type { Answer, Question } from '../types';
+import type { Answer, Highlight, Question } from '../types';
 import './galaxy.css';
+import StellarText from './StellarText';
 
 interface GalaxySceneProps {
   questions: Question[];
@@ -15,6 +16,10 @@ interface GalaxySceneProps {
   reducedMotion: boolean;
   resetToken: number;
   relevanceLabel?: string;
+  onOpenReader: (paragraphIndex?: number, quote?: string) => void;
+  selectedParagraph: number | null;
+  onSelectParagraph: (index: number, quote?: string) => void;
+  selectedQuote?: string;
 }
 
 interface GalaxyNode {
@@ -23,12 +28,24 @@ interface GalaxyNode {
   answers: { answer: Answer; position: THREE.Vector3 }[];
 }
 
-type ProjectedLabel = { key: string; position: THREE.Vector3; relevance: number; selected: boolean };
+type ContentLayer = { id: number; key: string; stage: number; question?: Question; answer?: Answer; questions: Question[]; phase: 'enter' | 'exit' };
+const orbitPositions = (count: number, paragraphs = false): number[][] => {
+  if (count === 1) return paragraphs ? [[22, 40]] : [[22, 52]];
+  if (count === 2) return paragraphs ? [[19, 32], [81, 46]] : [[19, 47], [81, 55]];
+  if (count === 3) return paragraphs ? [[19, 23], [81, 23], [19, 57]] : [[19, 31], [81, 32], [50, 73]];
+  if (count === 4) return paragraphs ? [[19, 22], [81, 22], [19, 57], [81, 57]] : [[19, 27], [81, 27], [19, 63], [81, 63]];
+  if (paragraphs) return [[17, 25], [83, 25], [16, 58], [84, 58], [35, 82], [65, 82]];
+  return [[19, 28], [81, 28], [16, 59], [84, 59], [35, 81], [65, 81]];
+};
+function meaningfulHighlights(answer: Answer): Highlight[] {
+  if (answer.highlights?.length) return answer.highlights;
+  return answer.paragraphs.map((text, paragraphIndex) => ({ id: `${answer.id}:${paragraphIndex}`, text, paragraphIndex })).filter(item => item.text.trim().length > 24).slice(0, 6);
+}
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 const smooth = (value: number) => { const t = clamp(value); return t * t * (3 - 2 * t); };
 const relevance = (value: number) => clamp(value > 1 ? value / 100 : value);
 const coordinates = [
-  [28, 8, 14], [-75, 52, -38], [125, 62, -56], [-114, -57, -10],
+  [-90, 14, 14], [91, 73, -38], [76, -79, -56], [-114, -80, -10],
   [108, -73, -34], [-179, 14, -102], [-12, -97, -65], [180, -5, -122],
   [18, 108, -115], [-172, 105, -132], [184, 117, -155], [-160, -127, -150],
 ];
@@ -47,7 +64,7 @@ function makeLayout(questions: Question[]): GalaxyNode[] {
       question, position,
       answers: question.answers.map((answer, answerIndex) => {
         const angle = answerIndex * 2.399963 + index * 0.4 + 0.65;
-        const radius = question.answers.length === 1 ? 0 : 15 + Math.sqrt(answerIndex) * 10;
+        const radius = 34 + Math.sqrt(answerIndex) * 7;
         return { answer, position: new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * 0.65, Math.sin(angle * 1.7) * 7).add(position) };
       }),
     };
@@ -142,10 +159,31 @@ export default function GalaxyScene(props: GalaxySceneProps) {
   propsRef.current = props;
   const [webglAvailable, setWebglAvailable] = useState(true);
   const [dragging, setDragging] = useState(false);
-  const layout = useMemo(() => makeLayout(props.questions), [props.questions]);
+  const layoutSignature = props.questions.map(question => `${question.id}:${question.answers.map(answer => answer.id).join(',')}`).join('|');
+  const layout = useMemo(() => makeLayout(props.questions), [layoutSignature]);
+  const cameraMemory = useRef<{ position: THREE.Vector3; target: THREE.Vector3; yaw: number; pitch: number } | null>(null);
+  const [page, setPage] = useState(0);
+  const pageRef = useRef(page);
+  pageRef.current = page;
   const selectedQuestion = props.questions.find(question => question.id === props.selectedQuestionId) ?? props.questions[0];
   const selectedAnswer = selectedQuestion?.answers.find(answer => answer.id === props.selectedAnswerId) ?? selectedQuestion?.answers[0];
   const stage = props.depth < 0.65 ? 0 : props.depth < 1.65 ? 1 : 2;
+  const layerKey = `${stage}:${stage ? selectedQuestion?.id : props.questions.map(question => question.id).join(',')}:${stage === 2 ? selectedAnswer?.id : ''}`;
+  const activeItemCount = stage === 1 ? selectedQuestion?.answers.length ?? 0 : stage === 2 && selectedAnswer ? meaningfulHighlights(selectedAnswer).length : props.questions.length;
+  useEffect(() => { setPage(previous => Math.min(previous, Math.max(0, Math.ceil(activeItemCount / 4) - 1))); }, [activeItemCount]);
+
+  const layerSerial = useRef(1);
+  const [layers, setLayers] = useState<ContentLayer[]>([{ id: 0, key: layerKey, stage, question: selectedQuestion, answer: selectedAnswer, questions: props.questions, phase: 'enter' }]);
+  useEffect(() => {
+    setPage(0);
+    setLayers(previous => {
+      if (previous.some(layer => layer.key === layerKey && layer.phase === 'enter')) return previous;
+      return [...previous.filter(layer => layer.phase !== 'exit').map(layer => ({ ...layer, phase: 'exit' as const })), { id: layerSerial.current++, key: layerKey, stage, question: selectedQuestion, answer: selectedAnswer, questions: props.questions, phase: 'enter' }];
+    });
+    const timer = setTimeout(() => setLayers(previous => previous.filter(layer => layer.phase !== 'exit')), props.reducedMotion ? 0 : 730);
+    return () => clearTimeout(timer);
+  }, [layerKey, props.reducedMotion]);
+
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -171,19 +209,20 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const cloudMaterials = new Map<string, THREE.ShaderMaterial>();
     const answerMaterials = new Map<string, THREE.ShaderMaterial>();
     const answerSprites = new Map<string, THREE.Sprite>();
+    const answerClouds = new Map<string, THREE.Object3D>();
     const questionSprites = new Map<string, THREE.Sprite>();
     const cloudGroups: THREE.Group[] = [];
     let width = container.clientWidth, height = container.clientHeight;
     let destroyed = false, contextLost = false, hidden = document.hidden, frame = 0, elapsed = 0, lastTime = 0;
-    let userYaw = -0.055, userPitch = 0.04, yaw = userYaw, pitch = userPitch;
+    let userYaw = cameraMemory.current?.yaw ?? -0.055, userPitch = cameraMemory.current?.pitch ?? 0.04, yaw = userYaw, pitch = userPitch;
     let previousReset = propsRef.current.resetToken;
     let previousQuestion = propsRef.current.selectedQuestionId;
     const flightOffset = new THREE.Vector3();
-    const target = new THREE.Vector3(12, 0, 0);
+    const target = cameraMemory.current?.target.clone() ?? new THREE.Vector3(12, 0, 0);
     const desiredTarget = new THREE.Vector3();
     const desiredPosition = new THREE.Vector3();
     const projected = new THREE.Vector3();
-    const currentPosition = new THREE.Vector3(12, 15, 335);
+    const currentPosition = cameraMemory.current?.position.clone() ?? new THREE.Vector3(12, 15, 335);
     const keys = new Set<string>();
     const pointers = new Map<number, { x: number; y: number }>();
     let pointerStart = { x: 0, y: 0 }, moved = false, pinchDistance = 0;
@@ -209,15 +248,15 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       group.position.copy(node.position);
       group.rotation.z = index * 0.58 + 0.22;
       group.rotation.x = (index % 3 - 1) * 0.18;
-      const dust = createCloud(random, Math.floor((isMobile ? 1050 : 2350) * (0.55 + r * 0.65)), 28 + r * 22, color, 0.35 + r * 0.75, pixelRatio);
+      const dust = createCloud(random, Math.floor((isMobile ? 1050 : 2350) * (0.55 + r * 0.65)), 28 + r * 22, color, 0.10 + Math.pow(r, 4.1) * 2.5, pixelRatio);
       group.add(dust);
       sceneMaterials.push(dust.material);
       cloudMaterials.set(node.question.id, dust.material);
       scene.add(group);
       cloudGroups.push(group);
-      const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, color, transparent: true, opacity: 0.4 + r * 0.45, blending: THREE.AdditiveBlending, depthWrite: false }));
+      const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, color, transparent: true, opacity: Math.min(1, 0.07 + Math.pow(r, 4) * 1.4), blending: THREE.AdditiveBlending, depthWrite: false }));
       halo.position.copy(node.position);
-      halo.scale.setScalar(33 + r * 23);
+      halo.scale.setScalar(22 + Math.pow(r, 3) * 70);
       questionSprites.set(node.question.id, halo);
       scene.add(halo);
       node.answers.forEach(({ answer, position }, answerIndex) => {
@@ -232,6 +271,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         cloud.rotation.z = answerIndex * 1.3;
         scene.add(cloud);
         answerMaterials.set(answer.id, cloud.material);
+        answerClouds.set(answer.id, cloud);
         sceneMaterials.push(cloud.material);
       });
     });
@@ -289,62 +329,32 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     };
 
     const updateLabels = (depth: number) => {
-      const { questionNode, answerNode } = focusNodes();
-      const level = depth < 0.65 ? 0 : depth < 1.65 ? 1 : 2;
-      const entries: ProjectedLabel[] = level === 0
-        ? layout.map(node => ({ key: `q:${node.question.id}`, position: node.position, relevance: relevance(node.question.relevance), selected: node === questionNode }))
-        : level === 1
-          ? (questionNode?.answers ?? []).map(node => ({ key: `a:${node.answer.id}`, position: node.position, relevance: relevance(node.answer.relevance), selected: node === answerNode }))
-          : answerNode ? [{ key: `a:${answerNode.answer.id}`, position: answerNode.position, relevance: 1, selected: true }] : [];
-      entries.sort((a, b) => Number(b.selected) - Number(a.selected) || b.relevance - a.relevance);
+      if (depth >= 0.65 || width < 760) return;
       const occupied: { x: number; y: number; w: number; h: number }[] = [];
-      const mobile = width < 760;
-      const labelWidth = mobile ? 176 : level === 2 ? 280 : 216;
-      const labelHeight = mobile ? 92 : level === 2 ? 125 : 104;
-      const containerBounds = container.getBoundingClientRect();
-      const obstructions = Array.from(document.querySelectorAll<HTMLElement>('.intro, .search-box, .discovery-panel, .article-panel, .journey-location, .bottom-center, .left-bottom')).map(element => {
-        const bounds = element.getBoundingClientRect();
-        return { x: bounds.x - containerBounds.x, y: bounds.y - containerBounds.y, w: bounds.width, h: bounds.height };
-      }).filter(bounds => bounds.w && bounds.h);
-      const intersects = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }, gap = 10) => a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
-      entries.forEach((entry, index) => {
-        const element = labelsRef.current.get(entry.key);
+      const ordered = [...layout].sort((a, b) => Number(b.question.id === propsRef.current.selectedQuestionId) - Number(a.question.id === propsRef.current.selectedQuestionId));
+      ordered.forEach(node => {
+        const element = labelsRef.current.get(`q:${node.question.id}`);
         if (!element) return;
-        projected.copy(entry.position).project(camera);
-        const x = (projected.x * 0.5 + 0.5) * width;
-        const y = (-projected.y * 0.5 + 0.5) * height;
-        const onScreen = projected.z < 1 && projected.z > -1 && x > -80 && x < width + 80 && y > 70 && y < height - 60;
-        if (!onScreen || mobile && index > 3) { element.style.visibility = 'hidden'; return; }
-        element.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
-        const candidates = level === 2 ? [[23, 28], [-labelWidth - 20, 24]] : [[18, 17], [-labelWidth - 18, 17], [18, -labelHeight - 12], [-labelWidth - 18, -labelHeight - 12], [18, 62], [-labelWidth - 18, -labelHeight - 52]];
-        let placement: { x: number; y: number; w: number; h: number } | null = null;
-        for (const [offsetX, offsetY] of candidates) {
-          const candidate = { x: x + offsetX, y: y + offsetY, w: labelWidth, h: labelHeight };
-          const inBounds = candidate.x >= (mobile ? 18 : 40) && candidate.x + labelWidth < width - 30 && candidate.y >= (mobile ? 162 : 118) && candidate.y + labelHeight < height - (mobile ? 172 : 105);
-          const blocked = obstructions.some(box => intersects(candidate, box));
-          const collision = occupied.some(box => intersects(candidate, box, 12));
-          if (inBounds && !blocked && !collision) { placement = candidate; break; }
+        projected.copy(node.position).project(camera);
+        const x = clamp((projected.x * .5 + .5) * width, 35, width - 35);
+        const y = clamp((-projected.y * .5 + .5) * height, 140, height - 110);
+        element.style.left = `${x}px`;
+        element.style.top = `${y}px`;
+        element.style.visibility = projected.z < 1 ? 'visible' : 'hidden';
+        const body = element.querySelector<HTMLElement>('.galaxy-label-body');
+        if (!body) return;
+        const bodyHeight = 176;
+        const candidates = [[24, 17], [-258, 17], [24, -bodyHeight - 15], [-258, -bodyHeight - 15], [24, 67], [-258, -bodyHeight - 60]];
+        let placement: { x: number; y: number; w: number; h: number } | undefined;
+        for (const [dx, dy] of candidates) {
+          const box = { x: x + dx, y: y + dy, w: 234, h: bodyHeight };
+          if (box.x < 26 || box.x + box.w > width - 26 || box.y < 125 || box.y + box.h > height - 94) continue;
+          if (occupied.some(other => box.x < other.x + other.w + 10 && box.x + box.w + 10 > other.x && box.y < other.y + other.h + 10 && box.y + box.h + 10 > other.y)) continue;
+          placement = box; break;
         }
-        if (!placement && entry.selected) {
-          // Keep the selected title reachable even when its star is near a HUD edge.
-          // On narrow screens the reading panel already supplies the article title.
-          const available: { x: number; y: number; w: number; h: number }[] = [];
-          for (let top = mobile ? 325 : 155; top < height - labelHeight - 140; top += 28) {
-            for (let left = 24; left < width - labelWidth - 24; left += 38) {
-              const candidate = { x: left, y: top, w: labelWidth, h: labelHeight };
-              if (!obstructions.some(box => intersects(candidate, box)) && !occupied.some(box => intersects(candidate, box))) available.push(candidate);
-            }
-          }
-          available.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y));
-          placement = available[0] ?? null;
-        }
-        element.style.visibility = placement ? 'visible' : 'hidden';
-        if (placement) {
-          occupied.push(placement);
-          const body = element.querySelector<HTMLElement>('.galaxy-label-body');
-          if (body) body.style.transform = `translate(${(placement.x - x).toFixed(1)}px, ${(placement.y - y).toFixed(1)}px)`;
-          element.style.opacity = `${entry.selected ? 1 : 0.6 + entry.relevance * 0.35}`;
-        }
+        if (!placement) placement = { x: clamp(x + 24, 26, width - 260), y: clamp(y + 17, 125, height - bodyHeight - 94), w: 234, h: bodyHeight };
+        occupied.push(placement);
+        body.style.left = `${placement.x - x}px`; body.style.top = `${placement.y - y}px`;
       });
     };
 
@@ -387,22 +397,38 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       camera.position.copy(currentPosition);
       camera.lookAt(target);
       camera.updateMatrixWorld();
+      cameraMemory.current = { position: currentPosition.clone(), target: target.clone(), yaw, pitch };
+      // Keep semantic stars and their readable orbit labels in the same projected positions.
+      if (depth >= .65 && depth < 1.65 && questionNode && width >= 760) {
+        const pageAnswers = questionNode.answers.slice(pageRef.current * 4, pageRef.current * 4 + 4);
+        const screenPositions = orbitPositions(pageAnswers.length);
+        const normal = camera.getWorldDirection(new THREE.Vector3());
+        const distance = camera.position.distanceTo(target);
+        pageAnswers.forEach((node, index) => {
+          const [x, y] = screenPositions[index];
+          const ray = new THREE.Vector3(x / 50 - 1, 1 - y / 50, .5).unproject(camera).sub(camera.position).normalize();
+          node.position.copy(ray.multiplyScalar(distance / Math.max(.1, ray.dot(normal))).add(camera.position));
+          answerSprites.get(node.answer.id)?.position.copy(node.position);
+          answerClouds.get(node.answer.id)?.position.copy(node.position);
+        });
+      }
+
       cloudGroups.forEach((group, index) => { group.rotation.z = index * 0.58 + 0.22 + Math.sin(elapsed * 0.035 + index) * 0.018; });
       sceneMaterials.forEach(material => { material.uniforms.uTime.value = elapsed; });
       layout.forEach(node => {
         const selected = node === questionNode;
-        const opacity = selected ? 1 - articleInward * 0.96 : 1 - inward * 0.88;
+        const opacity = selected ? (1 - inward * .70) * (1 - articleInward * .94) : 1 - inward * .93;
         const material = cloudMaterials.get(node.question.id);
         if (material) material.uniforms.uOpacity.value = opacity;
         const halo = questionSprites.get(node.question.id);
-        if (halo) halo.material.opacity = (0.28 + relevance(node.question.relevance) * 0.56) * opacity;
+        if (halo) halo.material.opacity = Math.min(1, 0.05 + Math.pow(relevance(node.question.relevance), 4.1) * 1.4) * opacity;
         node.answers.forEach(({ answer }) => {
           const answerSelected = answer.id === answerNode?.answer.id;
           const material = answerMaterials.get(answer.id);
-          if (material) material.uniforms.uOpacity.value = selected ? THREE.MathUtils.lerp(0.4, answerSelected ? 0.085 : 0.045, articleInward) : 0.18 * (1 - inward);
+          if (material) material.uniforms.uOpacity.value = selected ? THREE.MathUtils.lerp(0.15, answerSelected ? 0.008 : 0.005, articleInward) : 0.18 * (1 - inward);
           const sprite = answerSprites.get(answer.id);
           if (sprite) {
-            sprite.material.opacity = selected ? (0.15 + relevance(answer.relevance) * 0.2 + inward * 0.55) * (answerSelected ? 1 : 1 - articleInward * 0.86) : 0.2 * (1 - inward);
+            sprite.material.opacity = selected ? (0.15 + relevance(answer.relevance) * 0.2 + inward * 0.55) * (1 - articleInward * (answerSelected ? .97 : .94)) : 0.2 * (1 - inward);
             sprite.scale.setScalar((9 + relevance(answer.relevance) * 8) * (answerSelected ? 1 + articleInward * 0.2 : 1));
           }
         });
@@ -427,11 +453,6 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       cancelAnimationFrame(frame);
       keys.clear();
       if (!hidden) { lastTime = 0; frame = requestAnimationFrame(animate); }
-    };
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * height : event.deltaY;
-      propsRef.current.onDepthChange(clamp(propsRef.current.depth - delta * 0.0011, 0, 2));
     };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
@@ -496,7 +517,6 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const onBlur = () => { keys.clear(); pointers.clear(); setDragging(false); };
     const onContextLost = (event: Event) => { event.preventDefault(); setWebglAvailable(false); contextLost = true; hidden = true; cancelAnimationFrame(frame); };
     const onContextRestored = () => { setWebglAvailable(true); contextLost = false; hidden = document.hidden; if (!hidden) { lastTime = 0; frame = requestAnimationFrame(animate); } };
-    container.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
@@ -511,7 +531,6 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     frame = requestAnimationFrame(animate);
     return () => {
       destroyed = true; cancelAnimationFrame(frame); resizeObserver.disconnect();
-      container.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
@@ -537,43 +556,109 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     };
   }, [layout]);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onWheel = (event: WheelEvent) => {
+      if (container.clientWidth < 760 && Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+      event.preventDefault();
+      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * container.clientHeight : event.deltaY;
+      const latest = propsRef.current;
+      if (delta < 0 && latest.depth < 1.65) {
+        const layer = container.querySelector('.galaxy-content-enter');
+        const candidates = Array.from(layer?.querySelectorAll<HTMLElement>('[data-node-id]') ?? []);
+        let nearest: HTMLElement | undefined;
+        let minimum = 100;
+        for (const element of candidates) {
+          if (event.target instanceof Node && element.contains(event.target)) { nearest = element; break; }
+          const marker = element.querySelector('.galaxy-star-marker');
+          const bounds = marker?.getBoundingClientRect();
+          if (!bounds) continue;
+          const distance = Math.hypot(bounds.x + bounds.width / 2 - event.clientX, bounds.y + bounds.height / 2 - event.clientY);
+          if (distance < minimum) { minimum = distance; nearest = element; }
+        }
+        if (nearest?.dataset.nodeId) {
+          if (nearest.dataset.nodeKind === 'question') latest.onSelectQuestion(nearest.dataset.nodeId);
+          else if (nearest.dataset.nodeKind === 'answer') latest.onSelectAnswer(nearest.dataset.nodeId);
+        }
+      }
+      latest.onDepthChange(clamp(latest.depth - delta * .0011, 0, 2));
+    };
+    container.addEventListener('wheel', onWheel, { passive: false });
+    return () => container.removeEventListener('wheel', onWheel);
+  }, []);
+
   const enterQuestion = (question: Question) => { props.onSelectQuestion(question.id); props.onDepthChange(1); };
   const enterAnswer = (answer: Answer) => { props.onSelectAnswer(answer.id); props.onDepthChange(2); };
-  const labels = stage === 0 ? props.questions.map((question, index) => ({
-    key: `q:${question.id}`, id: question.id, title: question.title, subtitle: `${question.answers.length} 个观点`,
-    relevance: relevance(question.relevance), color: question.color, number: index + 1, selected: question.id === selectedQuestion?.id,
-    select: () => props.onSelectQuestion(question.id), enter: () => enterQuestion(question), enterText: '进入星系',
-  })) : (stage === 1 ? selectedQuestion?.answers ?? [] : selectedAnswer ? [selectedAnswer] : []).map((answer, index) => ({
-    key: `a:${answer.id}`, id: answer.id, title: answer.title, subtitle: answer.author,
-    relevance: relevance(answer.relevance), color: selectedQuestion?.color ?? '#c5dbe6', number: index + 1, selected: answer.id === selectedAnswer?.id,
-    select: () => props.onSelectAnswer(answer.id), enter: () => enterAnswer(answer), enterText: '阅读观点',
-  }));
+  const sourceSubtitle = (question: Question) => question.kind === 'topic' ? `主题聚合 · ${question.answers.length} 篇原文` : question.kind === 'article' ? '独立文章' : `${question.answers.length} 个回答`;
 
   return (
     <div ref={containerRef} className={`galaxy-scene ${dragging ? 'galaxy-is-dragging' : ''} ${!webglAvailable ? 'galaxy-is-fallback' : ''} ${props.reducedMotion ? 'galaxy-reduced-motion' : ''}`} data-depth={stage} aria-label="知识宇宙探索">
       <div className="galaxy-nebula galaxy-nebula-one" aria-hidden="true" />
       <div className="galaxy-nebula galaxy-nebula-two" aria-hidden="true" />
       <div className="galaxy-nebula galaxy-nebula-three" aria-hidden="true" />
-      <canvas ref={canvasRef} className="galaxy-canvas" tabIndex={0} aria-label="三维知识星空。滚轮向上深入，向下返回，拖动调整视角；也可使用页面的层级按钮和星系标签。" />
+      <canvas ref={canvasRef} className="galaxy-canvas" tabIndex={0} aria-label="三维知识星空。滚轮向上深入，向下返回，拖动调整视角；选择星光可进入下一层。" />
       <div className="galaxy-vignette" aria-hidden="true" />
-      {!webglAvailable && <div className="galaxy-fallback-notice">二维星图 <span>选择一个问题，继续你的探索</span></div>}
-      <div className="galaxy-labels" aria-label={stage === 0 ? '相关问题星系' : '问题中的回答'}>
-        {labels.map(label => (
-          <div key={label.key} ref={element => { if (element) labelsRef.current.set(label.key, element); else labelsRef.current.delete(label.key); }}
-            className={`galaxy-label ${label.selected ? 'galaxy-label-selected' : ''} ${stage === 2 ? 'galaxy-label-article' : ''}`}
-            style={{ '--galaxy-star-color': label.color } as React.CSSProperties}>
-            <button className="galaxy-star-marker" onClick={label.select} onDoubleClick={label.enter} aria-label={`聚焦${stage === 0 ? '问题' : '回答'}：${label.title}`} aria-pressed={label.selected}><span /></button>
-            <div className="galaxy-label-body">
-              <span className="galaxy-label-eyebrow">{stage === 0 ? 'QUESTION' : 'PERSPECTIVE'} <i>{String(label.number).padStart(2, '0')}</i>{label.selected && <b>已定位</b>}</span>
-              <button className="galaxy-label-title" onClick={label.select} onDoubleClick={label.enter}>{label.title}</button>
-              <span className="galaxy-label-meta"><span className="galaxy-relevance-bars" aria-hidden="true">{[0, 1, 2, 3, 4].map(bar => <i key={bar} style={{ opacity: bar < Math.round(label.relevance * 5) ? 1 : 0.2 }} />)}</span>{Math.round(label.relevance * 100)}% {props.relevanceLabel ?? '相关'} <span className="galaxy-label-dot">·</span>{label.subtitle}</span>
-              {stage !== 2 && <button className="galaxy-label-enter" onClick={label.enter} aria-label={`${label.enterText}：${label.title}`}>{label.enterText}<span aria-hidden="true">↗</span></button>}
+      {!webglAvailable && <span className="galaxy-fallback-notice">二维星图</span>}
+      {layers.map(layer => {
+        const exiting = layer.phase === 'exit';
+        const question = layer.key === layerKey ? selectedQuestion : layer.question;
+        const answer = layer.key === layerKey ? selectedAnswer : layer.answer;
+        const questions = layer.key === layerKey ? props.questions : layer.questions;
+        const phase = layer.phase;
+        const layerHighlights = answer ? meaningfulHighlights(answer) : [];
+        const items = layer.stage === 0 ? questions : layer.stage === 1 ? question?.answers ?? [] : layerHighlights;
+        const pageSize = 4;
+        const visibleItems = layer.stage === 0 ? items : items.slice(page * pageSize, page * pageSize + pageSize);
+        const positions = orbitPositions(visibleItems.length, layer.stage === 2);
+        const txt = (text: string, className = '') => <StellarText text={text} phase={phase} reducedMotion={props.reducedMotion} className={className} />;
+        return <div key={layer.id} className={`galaxy-content-layer galaxy-content-${layer.stage} galaxy-content-${phase}`} aria-hidden={exiting || undefined} ref={element => { if (element) element.inert = exiting; }}>
+          {layer.stage > 0 && question && <>
+            <svg className="galaxy-orbit-lines" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
+              <ellipse cx="500" cy="354" rx="330" ry="228" />
+              <ellipse cx="500" cy="354" rx="344" ry="239" className="galaxy-orbit-faint" />
+              {positions.map(([x, y], index) => <path key={index} d={`M 500 354 Q ${x * 10} 354 ${x * 10} ${y * 7}`} />)}
+            </svg>
+            <div className={`galaxy-hub ${layer.stage === 2 ? 'galaxy-hub-article' : ''}`} style={{ '--galaxy-star-color': question.color } as React.CSSProperties}>
+              <div className="galaxy-hub-star" aria-hidden="true"><i /><span /></div>
+              <span className="galaxy-hub-kind">{layer.stage === 1 ? (question.kind === 'topic' ? 'THEME' : question.kind === 'article' ? 'ARTICLE' : 'QUESTION') : 'ARTICLE'}<i /></span>
+              {layer.stage === 2 && answer ? <button className="galaxy-hub-title" onClick={() => props.onOpenReader()} aria-label={`阅读原文：${answer.title}`}>{txt(answer.title)}</button> : <h1 className="galaxy-hub-title">{txt(question.title)}</h1>}
+              <span className="galaxy-hub-meta">{layer.stage === 1 ? sourceSubtitle(question) : answer?.author}</span>
+              {layer.stage === 2 && <button className="galaxy-hub-read" onClick={() => props.onOpenReader()}>展开原文阅览 <span aria-hidden="true">↗</span></button>}
+              {items.length > pageSize && <div className="galaxy-orbit-pagination"><button onClick={() => setPage(value => Math.max(0, value - 1))} disabled={!page} aria-label="上一组星光">←</button><span>{page * pageSize + 1}—{Math.min(items.length, page * pageSize + pageSize)} / {items.length}</span><button disabled={(page + 1) * pageSize >= items.length} onClick={() => setPage(value => value + 1)} aria-label="下一组星光">→</button></div>}
             </div>
+          </>}
+          <div className="galaxy-labels" aria-label={layer.stage === 0 ? '相关问题星系' : layer.stage === 1 ? '问题中的回答' : '文章精华段落'}>
+            {visibleItems.map((item, index) => {
+              const isQuestion = layer.stage === 0, isParagraph = layer.stage === 2;
+              const q = isQuestion ? item as Question : question;
+              const a = layer.stage === 1 ? item as Answer : answer;
+              const highlight = isParagraph ? item as Highlight : null;
+              const title = highlight ? highlight.text : isQuestion ? q!.title : a!.title;
+              const selected = isQuestion ? q?.id === props.selectedQuestionId : isParagraph ? highlight?.paragraphIndex === props.selectedParagraph && (!props.selectedQuote || highlight.text === props.selectedQuote) : a?.id === props.selectedAnswerId;
+              const key = isQuestion ? `q:${item.id}` : isParagraph ? `p:${item.id}` : `a:${item.id}`;
+              const r = relevance(isQuestion ? q!.relevance : a?.relevance ?? 1);
+              const luminosity = .1 + Math.pow(r, 4.1) * 2.4;
+              const [left, top] = positions[index] ?? [50, 50];
+              const select = () => { if (isQuestion) props.onSelectQuestion(q!.id); else if (highlight) props.onSelectParagraph(highlight.paragraphIndex, highlight.text); else props.onSelectAnswer(a!.id); };
+              const enter = () => { if (isQuestion) enterQuestion(q!); else if (highlight) props.onOpenReader(highlight.paragraphIndex, highlight.text); else enterAnswer(a!); };
+              return <div key={key} data-node-id={item.id} data-node-kind={isQuestion ? 'question' : isParagraph ? 'paragraph' : 'answer'} ref={element => { if (!exiting) { if (element) labelsRef.current.set(key, element); else labelsRef.current.delete(key); } }}
+                className={`galaxy-label ${selected ? 'galaxy-label-selected' : ''} ${isParagraph ? 'galaxy-label-paragraph' : ''}`}
+                style={{ left: `${left}%`, top: `${top}%`, '--galaxy-star-color': q?.color ?? '#c5dbe6', '--star-power': luminosity, '--node-index': index } as React.CSSProperties}>
+                <button className="galaxy-star-marker" onClick={select} onDoubleClick={enter} aria-label={`聚焦${isQuestion ? '问题' : isParagraph ? '段落' : '回答'}：${title.slice(0, 70)}`} aria-pressed={selected}><span /><i /></button>
+                <div className="galaxy-label-body">
+                  <span className="galaxy-label-eyebrow">{isQuestion ? (q?.kind === 'topic' ? 'THEME' : q?.kind === 'article' ? 'ARTICLE' : 'QUESTION') : isParagraph ? `EXCERPT ${String(page * pageSize + index + 1).padStart(2, '0')}` : question?.kind === 'topic' || question?.kind === 'article' ? 'ARTICLE' : 'ANSWER'}<i /></span>
+                  <button className="galaxy-label-title" onClick={isParagraph ? select : enter} onDoubleClick={isParagraph ? enter : undefined}>{txt(isParagraph && title.length > 180 ? `${title.slice(0, 180)}…` : title)}</button>
+                  <span className="galaxy-label-meta">{isQuestion ? sourceSubtitle(q!) : highlight ? `原文第 ${highlight.paragraphIndex + 1} 段${selected ? ' · 已选中' : ''}` : a?.author}</span>
+                  {!isParagraph && <button className="galaxy-label-enter" onClick={enter} aria-label={`${isQuestion ? '进入星系' : '阅读观点'}：${title}`}>{isQuestion ? '进入星系' : (question?.kind === 'topic' || question?.kind === 'article' ? '深入这篇文章' : '深入这篇回答')}<span aria-hidden="true">↗</span></button>}
+                  {isParagraph && <button className="galaxy-label-enter" onClick={enter} aria-label={`在原文中阅读第 ${highlight!.paragraphIndex + 1} 段`}>在原文中阅读<span aria-hidden="true">↗</span></button>}
+                </div>
+              </div>;
+            })}
           </div>
-        ))}
-      </div>
-      {props.flightMode && <div className="galaxy-flight-hud" aria-hidden="true"><span className="galaxy-reticle" /><div className="galaxy-flight-caption">FLIGHT MODE <i /> W A S D 飞行 · SHIFT 加速</div></div>}
-      <div className="galaxy-coordinates" aria-hidden="true"><span>RA {String(Math.round(203 + props.depth * 31)).padStart(3, '0')}°</span><i /><span>DEC +{(23.4 + props.depth * 8.7).toFixed(1)}°</span></div>
+        </div>;
+      })}
+      {props.flightMode && <div className="galaxy-flight-hud" aria-hidden="true"><span className="galaxy-reticle" /><div className="galaxy-flight-caption">W A S D 飞行 · SHIFT 加速</div></div>}
     </div>
   );
 }

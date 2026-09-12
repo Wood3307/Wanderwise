@@ -39,8 +39,11 @@ import {
   Minimize,
   Navigation,
   BookOpen,
+  Cable,
+  Minus,
 } from "lucide-react";
 import GalaxyScene from "./components/GalaxyScene";
+import ReadingRoom from "./components/ReadingRoom";
 import type {
   Answer,
   ExploreResponse,
@@ -48,6 +51,9 @@ import type {
   Question,
   Reflection,
   SavedItem,
+  QuestionResponse,
+  HighlightResponse,
+  ConnectionStatus,
 } from "./types";
 import {
   downloadMarkdown,
@@ -65,7 +71,13 @@ import {
   returnToObservatory,
 } from "./lib/integration";
 
-type Drawer = "collection" | "journey" | "help" | "return" | null;
+type Drawer =
+  | "collection"
+  | "journey"
+  | "help"
+  | "return"
+  | "connection"
+  | null;
 const depthNames = ["问题星海", "观点星系", "文章恒星"];
 const number = (value: number) => value.toString().padStart(2, "0");
 const timeLabel = (date: string) =>
@@ -182,7 +194,23 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [detailRetry, setDetailRetry] = useState(0);
-  const [readerExpanded, setReaderExpanded] = useState(false);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [expandedQuestions, setExpandedQuestions] = useState<
+    Record<string, Question>
+  >({});
+  const [highlights, setHighlights] = useState<
+    Record<string, HighlightResponse & { sourceKey: string }>
+  >({});
+  const [answerLoading, setAnswerLoading] = useState(false);
+  const [answerError, setAnswerError] = useState("");
+  const [answerRetry, setAnswerRetry] = useState(0);
+  const [highlightLoading, setHighlightLoading] = useState(false);
+  const [highlightError, setHighlightError] = useState("");
+  const [highlightRetry, setHighlightRetry] = useState(0);
+  const [connection, setConnection] = useState<ConnectionStatus | null>(null);
+  const [connectionError, setConnectionError] = useState("");
+  const [connectionRetry, setConnectionRetry] = useState(0);
+  const [selectedQuote, setSelectedQuote] = useState<string | undefined>();
   const [depth, setDepth] = useState(0);
   const [flightMode, setFlightMode] = useState(false);
   const [resetToken, setResetToken] = useState(0);
@@ -215,11 +243,26 @@ export default function App() {
   const level = depth < 0.65 ? 0 : depth < 1.65 ? 1 : 2;
   const questions = useMemo(
     () =>
-      (data?.questions ?? []).map((question) => ({
-        ...question,
-        answers: question.answers.map((answer) => details[answer.id] ?? answer),
-      })),
-    [data, details],
+      (data?.questions ?? []).map((original) => {
+        const question = expandedQuestions[original.id] ?? original;
+        return {
+          ...question,
+          answers: question.answers.map((originalAnswer) => {
+            const answer = details[originalAnswer.id] ?? originalAnswer;
+            const selection = highlights[answer.id];
+            return selection &&
+              selection.sourceKey === answerSourceKey(answer) &&
+              quotesMatch(answer, selection)
+              ? {
+                  ...answer,
+                  highlights: selection.highlights,
+                  highlightMethod: selection.method,
+                }
+              : answer;
+          }),
+        };
+      }),
+    [data, details, expandedQuestions, highlights],
   );
   const selectedQuestion =
     questions.find((question) => question.id === selectedQuestionId) ??
@@ -228,6 +271,10 @@ export default function App() {
     selectedQuestion?.answers.find(
       (answer) => answer.id === selectedAnswerId,
     ) ?? selectedQuestion?.answers[0];
+  const selectedSourceKey = useMemo(
+    () => (selectedAnswer ? answerSourceKey(selectedAnswer) : ""),
+    [selectedAnswer?.title, selectedAnswer?.paragraphs],
+  );
   const totalAnswers = questions.reduce(
     (total, question) => total + question.answers.length,
     0,
@@ -254,6 +301,7 @@ export default function App() {
         setQuery(next.query);
         setSearchText(next.query);
         setDrawer(null);
+        setReaderOpen(false);
         setDepth(0);
         setRetry((value) => value + 1);
       }),
@@ -267,6 +315,10 @@ export default function App() {
     setSelectedParagraph(null);
     setData(null);
     setDetails({});
+    setExpandedQuestions({});
+    setHighlights({});
+    setReaderOpen(false);
+    setSelectedQuote(undefined);
     fetch(`/api/explore?q=${encodeURIComponent(query)}`, {
       signal: controller.signal,
     })
@@ -281,32 +333,62 @@ export default function App() {
           );
         return result as ExploreResponse;
       })
-      .then((result) => {
-        setData(result);
+      .then(async (result) => {
+        if (controller.signal.aborted) return;
         const pending = pendingVisit.current;
-        const destination = pending
-          ? result.questions.find(
-              (question) => question.id === pending.questionId,
-            )
+        let destination = pending
+          ? locateStop(result.questions, pending)
           : undefined;
-        const validDestination =
-          destination &&
-          (!pending?.answerId ||
-            destination.answers.some(
-              (answer) => answer.id === pending.answerId,
-            ));
-        const selected = validDestination ? destination : result.questions[0];
+        let restoreError: string | undefined;
+        if (pending?.answerId && !destination) {
+          const parent = result.questions.find(
+            (question) => question.id === pending.questionId,
+          );
+          if (
+            parent &&
+            !parent.answersExpanded &&
+            parent.kind !== "topic" &&
+            parent.kind !== "article"
+          ) {
+            try {
+              const expanded = await fetch(
+                `/api/questions/${encodeURIComponent(parent.id)}?q=${encodeURIComponent(query)}`,
+                { signal: controller.signal },
+              ).then(readResponse<QuestionResponse>);
+              if (controller.signal.aborted) return;
+              if (expanded.question.id !== parent.id)
+                throw new Error(
+                  "原问题暂时无法确认，请通过收藏中的来源链接阅读。",
+                );
+              result = {
+                ...result,
+                questions: result.questions.map((question) =>
+                  question.id === parent.id ? expanded.question : question,
+                ),
+              };
+              destination = locateStop(result.questions, pending);
+            } catch (reason) {
+              if (controller.signal.aborted) return;
+              restoreError =
+                reason instanceof Error
+                  ? reason.message
+                  : "暂时无法展开原问题，请稍后再试。";
+            }
+          }
+        }
+        if (controller.signal.aborted) return;
+        setData(result);
+        const selected = destination?.question ?? result.questions[0];
         setSelectedQuestionId(selected?.id ?? null);
         setSelectedAnswerId(
-          validDestination
-            ? (pending?.answerId ?? selected?.answers[0]?.id ?? null)
-            : (selected?.answers[0]?.id ?? null),
+          destination?.answerId ?? selected?.answers[0]?.id ?? null,
         );
         if (pending) {
-          setDepth(validDestination ? (pending.answerId ? 2 : 1) : 0);
-          if (!validDestination)
+          setDepth(destination ? (destination.answerId ? 2 : 1) : 0);
+          if (!destination)
             notify(
-              "这条收藏或足迹暂未出现在最新结果中，可从行囊中的来源链接继续阅读。",
+              restoreError ??
+                "这条收藏或足迹暂未出现在最新结果中，可从行囊中的来源链接继续阅读。",
             );
           pendingVisit.current = null;
         }
@@ -350,12 +432,13 @@ export default function App() {
           );
         return result as Answer;
       })
-      .then((answer) =>
+      .then((answer) => {
+        if (controller.signal.aborted) return;
         setDetails((previous) => ({
           ...previous,
           [selectedAnswer.id]: answer,
-        })),
-      )
+        }));
+      })
       .catch((reason) => {
         if (!controller.signal.aborted)
           setDetailError(
@@ -421,10 +504,14 @@ export default function App() {
     setSelectedQuestionId(id);
     setSelectedAnswerId(question?.answers[0]?.id ?? null);
     setSelectedParagraph(null);
+    setSelectedQuote(undefined);
+    setReaderOpen(false);
   }
   function chooseAnswer(id: string) {
     setSelectedAnswerId(id);
     setSelectedParagraph(null);
+    setSelectedQuote(undefined);
+    setReaderOpen(false);
   }
   function search(event: FormEvent) {
     event.preventDefault();
@@ -492,7 +579,7 @@ export default function App() {
       title: level === 2 ? selectedAnswer!.title : selectedQuestion.title,
       quote:
         level === 2 && selectedParagraph !== null
-          ? selectedAnswer?.paragraphs[selectedParagraph]
+          ? (selectedQuote ?? selectedAnswer?.paragraphs[selectedParagraph])
           : undefined,
     });
     setReflectionText("");
@@ -531,18 +618,11 @@ export default function App() {
     if (item.query) url.searchParams.set("q", item.query);
     else url.searchParams.delete("q");
     window.history.replaceState({}, "", url);
-    const destination = questions.find(
-      (question) => question.id === item.questionId,
-    );
-    if (
-      query === item.query &&
-      destination &&
-      (!item.answerId ||
-        destination.answers.some((answer) => answer.id === item.answerId))
-    ) {
-      chooseQuestion(item.questionId);
-      if (item.answerId) setSelectedAnswerId(item.answerId);
-      setDepth(item.answerId ? 2 : 1);
+    const destination = locateStop(questions, item);
+    if (query === item.query && destination) {
+      chooseQuestion(destination.question.id);
+      if (destination.answerId) setSelectedAnswerId(destination.answerId);
+      setDepth(destination.answerId ? 2 : 1);
     } else {
       pendingVisit.current = item;
       setSearchText(item.query);
@@ -582,7 +662,7 @@ export default function App() {
       if (event.key === "Escape") {
         if (reflectionTarget) setReflectionTarget(null);
         else if (drawer) setDrawer(null);
-        else if (readerExpanded && level === 2) setReaderExpanded(false);
+        else if (readerOpen) setReaderOpen(false);
         else if (level > 0) setDepth(level - 1);
         else setFlightMode(false);
         return;
@@ -598,84 +678,263 @@ export default function App() {
         return;
       if (event.key.toLowerCase() === "e") toggleSave();
       if (event.key.toLowerCase() === "r") openReflection();
+      if (readerOpen) return;
       if (event.key === "/") {
         event.preventDefault();
         searchRef.current?.focus();
       }
       if (event.key === "?") setDrawer("help");
-      if (event.key.toLowerCase() === "f") setFlightMode((value) => !value);
+      if (!readerOpen && event.key.toLowerCase() === "f")
+        setFlightMode((value) => !value);
+      if (!readerOpen && event.key === "Enter" && level === 2 && selectedAnswer)
+        openReader();
     }
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
   });
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setConnectionError("");
+    fetch("/api/health", { signal: controller.signal })
+      .then(readResponse<ConnectionStatus>)
+      .then(setConnection)
+      .catch((reason) => {
+        if (!controller.signal.aborted)
+          setConnectionError(
+            reason instanceof Error ? reason.message : "连接状态暂不可用",
+          );
+      });
+    return () => controller.abort();
+  }, [connectionRetry]);
+
+  useEffect(() => {
+    setAnswerError("");
+    setAnswerLoading(false);
+    if (
+      loading ||
+      data?.query !== query ||
+      level === 0 ||
+      !selectedQuestion ||
+      selectedQuestion.answersExpanded ||
+      selectedQuestion.kind === "topic" ||
+      selectedQuestion.kind === "article"
+    )
+      return;
+    const controller = new AbortController();
+    const questionId = selectedQuestion.id;
+    setAnswerLoading(true);
+    fetch(
+      `/api/questions/${encodeURIComponent(questionId)}?q=${encodeURIComponent(query)}`,
+      { signal: controller.signal },
+    )
+      .then(readResponse<QuestionResponse>)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setExpandedQuestions((previous) => ({
+          ...previous,
+          [questionId]: result.question,
+        }));
+        if (result.notice) notify(result.notice);
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted)
+          setAnswerError(
+            reason instanceof Error
+              ? reason.message
+              : "暂未能展开这个问题的回答",
+          );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setAnswerLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    query,
+    level,
+    selectedQuestion?.id,
+    selectedQuestion?.answersExpanded,
+    answerRetry,
+    loading,
+    data?.query,
+  ]);
+
+  useEffect(() => {
+    setHighlightError("");
+    setHighlightLoading(false);
+    if (
+      loading ||
+      data?.query !== query ||
+      level !== 2 ||
+      !selectedAnswer ||
+      !selectedQuestion ||
+      answerLoading ||
+      (highlights[selectedAnswer.id]?.sourceKey === selectedSourceKey &&
+        quotesMatch(selectedAnswer, highlights[selectedAnswer.id]))
+    )
+      return;
+    const controller = new AbortController();
+    const answerId = selectedAnswer.id;
+    setHighlightLoading(true);
+    fetch(
+      `/api/answers/${encodeURIComponent(answerId)}/highlights?q=${encodeURIComponent(query)}&questionId=${encodeURIComponent(selectedQuestion.id)}`,
+      { signal: controller.signal },
+    )
+      .then(readResponse<HighlightResponse>)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        if (
+          result.answerId !== answerId ||
+          !quotesMatch(selectedAnswer, result)
+        )
+          throw new Error("片段与当前原文不匹配，已保留原文内容。");
+        setHighlights((previous) => ({
+          ...previous,
+          [answerId]: { ...result, sourceKey: selectedSourceKey },
+        }));
+        if (result.notice) notify(result.notice);
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted)
+          setHighlightError(
+            reason instanceof Error
+              ? reason.message
+              : "片段筛选暂时不可用，仍可直接阅读原文",
+          );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setHighlightLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    query,
+    level,
+    selectedQuestion?.id,
+    selectedAnswer?.id,
+    selectedSourceKey,
+    answerLoading,
+    highlightRetry,
+    loading,
+    data?.query,
+  ]);
+
+  useEffect(() => {
+    if (!selectedQuote || !selectedAnswer) return;
+    const index = selectedAnswer.paragraphs.findIndex((paragraph) =>
+      paragraph.includes(selectedQuote),
+    );
+    setSelectedParagraph(index >= 0 ? index : null);
+    if (index < 0) setSelectedQuote(undefined);
+  }, [selectedSourceKey]);
+
+  function selectParagraph(index: number, quote?: string) {
+    setSelectedParagraph(index);
+    setSelectedQuote(
+      quote ??
+        selectedAnswer?.highlights?.find(
+          (highlight) => highlight.paragraphIndex === index,
+        )?.text ??
+        selectedAnswer?.paragraphs[index],
+    );
+  }
+  function openReader(paragraphIndex?: number, quote?: string) {
+    if (!selectedAnswer) return;
+    if (paragraphIndex !== undefined) selectParagraph(paragraphIndex, quote);
+    setReaderOpen(true);
+  }
+  function changeDepth(value: number) {
+    setDepth(
+      Math.max(
+        0,
+        Math.min(selectedAnswer ? 2 : selectedQuestion ? 1 : 0, value),
+      ),
+    );
+    setReaderOpen(false);
+  }
+  const modalActive = !!drawer || !!reflectionTarget || readerOpen;
+
   return (
     <main
-      className={`app depth-${level} ${drawer || reflectionTarget ? "has-modal" : ""}`}
+      className={`app immersion-v2 depth-${level} ${modalActive ? "has-modal" : ""}`}
     >
       <div
         className="universe"
         aria-label="交互式三维知识宇宙"
-        {...(drawer || reflectionTarget ? { inert: "" } : {})}
+        {...(modalActive ? { inert: "" } : {})}
       >
         <GalaxyScene
           questions={questions}
           selectedQuestionId={selectedQuestion?.id ?? null}
           selectedAnswerId={selectedAnswer?.id ?? null}
           depth={depth}
-          onDepthChange={(value) =>
-            setDepth(
-              Math.max(
-                0,
-                Math.min(selectedAnswer ? 2 : selectedQuestion ? 1 : 0, value),
-              ),
-            )
-          }
+          onDepthChange={changeDepth}
           onSelectQuestion={chooseQuestion}
           onSelectAnswer={chooseAnswer}
-          flightMode={flightMode && !drawer && !reflectionTarget}
+          flightMode={flightMode && !modalActive}
           reducedMotion={reducedMotion}
           resetToken={resetToken}
-          relevanceLabel={query ? "相关" : "亮度"}
+          onOpenReader={openReader}
+          selectedParagraph={selectedParagraph}
+          selectedQuote={selectedQuote}
+          onSelectParagraph={selectParagraph}
         />
       </div>
       <div className="universe-vignette" />
-      <div
-        className="interface"
-        {...(drawer || reflectionTarget ? { inert: "" } : {})}
-      >
+      <div className="interface" {...(modalActive ? { inert: "" } : {})}>
         <header className="topbar">
           <button
             className="brand"
             onClick={() => {
-              setDepth(0);
+              changeDepth(0);
               setResetToken((value) => value + 1);
             }}
-            aria-label="Wanderwise 返回问题星海"
+            aria-label="Wanderwise 返回星海"
           >
             <span className="brand-symbol">
-              <Sparkles size={28} strokeWidth={1.35} />
+              <Sparkles size={26} strokeWidth={1.2} />
             </span>
-            <span>
-              Wanderwise<span className="brand-cn">漫知</span>
-            </span>
+            <span>Wanderwise</span>
           </button>
-          <nav className="main-nav" aria-label="主导航">
+          <form className="search-box" onSubmit={search} role="search">
+            <Search size={17} />
+            <input
+              ref={searchRef}
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="带着一个问题出发"
+              aria-label="探索问题或话题"
+              maxLength={160}
+            />
+            {query && (
+              <button
+                type="button"
+                className="search-clear"
+                aria-label="回到自由漫游"
+                onClick={discover}
+              >
+                <X size={14} />
+              </button>
+            )}
             <button
-              className="nav-link selected"
-              aria-label="星空探索"
-              onClick={() => setDrawer(null)}
+              type="submit"
+              className="search-submit"
+              aria-label="开始探索"
             >
-              <Orbit size={17} />
-              <span>星空探索</span>
+              {loading ? (
+                <LoaderCircle className="spinning" size={16} />
+              ) : (
+                <ArrowRight size={17} />
+              )}
             </button>
+          </form>
+          <nav className="main-nav" aria-label="主导航">
             <button
               className="nav-link"
               aria-label="知识行囊"
               onClick={() => setDrawer("collection")}
             >
-              <Backpack size={17} />
-              <span>知识行囊</span>
+              <Backpack size={18} />
+              <span>行囊</span>
               {collection.length > 0 && (
                 <span className="nav-count">{collection.length}</span>
               )}
@@ -685,123 +944,38 @@ export default function App() {
               aria-label="探索足迹"
               onClick={() => setDrawer("journey")}
             >
-              <Footprints size={17} />
-              <span>探索足迹</span>
+              <Footprints size={18} />
+              <span>足迹</span>
+            </button>
+            <button
+              className="nav-link home-link"
+              aria-label="返回占星台"
+              title="返回占星台"
+              onClick={returnHome}
+            >
+              <Telescope size={19} />
             </button>
           </nav>
-          <button
-            className="home-link"
-            aria-label="返回占星台"
-            onClick={returnHome}
-          >
-            <Telescope size={17} />
-            <span>返回占星台</span>
-            <ArrowUpRight size={14} />
-          </button>
         </header>
-
-        <section className="intro">
-          <div className="eyebrow">
-            <span className="status-dot" /> A UNIVERSE OF POSSIBILITIES
-          </div>
-          <h1>
-            {level === 0 ? (
-              <>
-                每一个问题，
-                <br />
-                都是一场<span>星际旅行。</span>
-              </>
-            ) : level === 1 ? (
-              <>
-                靠近一个问题，
-                <br />
-                遇见<span>不同的光。</span>
-              </>
-            ) : (
-              <>
-                停驻一颗恒星，
-                <br />
-                让思考<span>慢慢发生。</span>
-              </>
-            )}
-          </h1>
-          <p>
-            {level === 0
-              ? "循着好奇心，发现知识之间意想不到的连接。"
-              : level === 1
-                ? "每一种真实的声音，都照亮世界的另一面。"
-                : "读一段文字，带走一束属于自己的灵感。"}
-          </p>
-          <div className="universe-stats">
-            <span>
-              <strong>{number(questions.length)}</strong>
-              {isPublic ? "知识主题" : "相关问题"}
-            </span>
-            <i />
-            <span>
-              <strong>{number(totalAnswers)}</strong>观点坐标
-            </span>
-            <i />
-            <span className="source-mark">
-              知<span>内容源自知乎</span>
-            </span>
-          </div>
-        </section>
-
-        <form className="search-box" onSubmit={search} role="search">
-          <Search size={18} />
-          <input
-            ref={searchRef}
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="带着一个问题，重新出发…"
-            aria-label="探索问题或话题"
-            maxLength={160}
-          />
-          <button type="submit" className="search-submit" aria-label="开始探索">
-            {loading ? (
-              <LoaderCircle className="spinning" size={17} />
-            ) : (
-              <ArrowRight size={18} />
-            )}
-          </button>
-          <kbd>/</kbd>
-        </form>
-
-        <div className="journey-location">
-          <span className="eyebrow">本次探索</span>
-          <span>{query || "从好奇出发，自由漫游"}</span>
-          {query && (
-            <button
-              onClick={discover}
-              title="回到自由漫游"
-              aria-label="回到自由漫游"
-            >
-              <X size={13} />
-            </button>
-          )}
-        </div>
-
         {loading && (
           <div className="center-message loading-message" role="status">
             <span className="loading-orbit">
-              <Orbit size={34} />
+              <Orbit size={31} />
             </span>
-            <h2>正在点亮你的知识宇宙</h2>
-            <p>连接真实的内容，寻找相遇的坐标</p>
+            <h2>正在展开知识星海</h2>
           </div>
         )}
         {!loading && (error || !questions.length) && (
           <div className="center-message empty-universe" role="status">
-            <Telescope size={36} />
+            <Telescope size={34} />
             <h2>
-              {error ? "暂时没能抵达这片星海" : "这个方向，还没有发现星光"}
+              {error ? "暂时无法抵达这片星海" : "这个问题还没有匹配的星光"}
             </h2>
             <p>
               {error ||
-                (isPublic
-                  ? "当前在知乎公开知识中检索。试试更短的话题，或回到自由漫游。"
-                  : "试试更简短的关键词，寻找新的连接。")}
+                (connection?.configured
+                  ? "试试更简短的关键词，寻找另一个方向。"
+                  : "当前检索知乎公开知识。连接知乎搜索后，可以探索更多真实问题与回答。")}
             </p>
             <div className="button-row">
               <button
@@ -810,294 +984,93 @@ export default function App() {
                   error ? () => setRetry((value) => value + 1) : discover
                 }
               >
-                {error ? <RefreshCw size={16} /> : <Compass size={16} />}
-                {error ? "重新连接" : "自由漫游"}
+                {error ? <RefreshCw size={15} /> : <Compass size={15} />}
+                {error ? "重新连接" : "浏览公开知识"}
               </button>
-              {error && (
-                <button className="text-button" onClick={discover}>
-                  回到探索起点
+              {!connection?.configured && (
+                <button
+                  className="secondary-button"
+                  onClick={() => setDrawer("connection")}
+                >
+                  <Cable size={15} />
+                  连接知乎
                 </button>
               )}
             </div>
           </div>
         )}
-
-        {!loading && selectedQuestion && level < 2 && (
-          <aside
-            className="discovery-panel glass-panel"
-            key={`${level}-${selectedQuestion.id}`}
-            aria-label={level === 0 ? "当前知识主题" : "当前问题的观点"}
-          >
-            <div className="panel-overline">
-              <span>
-                <span className="tiny-star">✦</span>
-                {level === 0 ? "此刻，与你产生引力" : "星系中的声音"}
-              </span>
-              <span className="mono">
-                {number(questions.indexOf(selectedQuestion) + 1)} /{" "}
-                {number(questions.length)}
-              </span>
-            </div>
-            <div className="topic-tags">
-              {selectedQuestion.keywords.slice(0, 2).map((tag) => (
-                <span key={tag}>{tag}</span>
-              ))}
-            </div>
-            <h2>{selectedQuestion.title}</h2>
-            <p className="topic-description">
-              {selectedQuestion.excerpt ||
-                "选择这颗星，走近原文中的观点与思考。"}
-            </p>
-            <div className="relevance">
-              <span>
-                <span
-                  style={{ backgroundColor: selectedQuestion.color }}
-                  className="status-dot"
-                />
-                {query ? "语义相关度" : "初始星光亮度"}
-              </span>
-              <strong>
-                {Math.round(selectedQuestion.relevance * 100)}
-                <small>%</small>
-              </strong>
-            </div>
-            <div className="relevance-track">
-              <span
-                style={{
-                  width: `${selectedQuestion.relevance * 100}%`,
-                  backgroundColor: selectedQuestion.color,
-                }}
-              />
-            </div>
-            {level === 0 ? (
-              <>
-                <div className="panel-meta">
-                  <Orbit size={14} />
-                  <span>{selectedQuestion.answers.length} 个已收录观点</span>
-                  <span>·</span>
-                  <span>等待你的靠近</span>
-                </div>
-                <button
-                  className="primary-button enter-button"
-                  onClick={() => setDepth(1)}
-                >
-                  进入这片星系
-                  <ArrowUpRight size={17} />
-                </button>
-              </>
-            ) : (
-              <>
-                <div className="answer-list">
-                  {!selectedQuestion.answers.length && (
-                    <p className="empty-answer">
-                      暂未收录这个问题的回答。
-                      {selectedQuestion.url && (
-                        <a
-                          href={selectedQuestion.url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          前往知乎阅读
-                          <ArrowUpRight size={12} />
-                        </a>
-                      )}
-                    </p>
-                  )}
-                  {selectedQuestion.answers.map((answer, index) => (
-                    <button
-                      key={answer.id}
-                      className={`answer-choice ${answer.id === selectedAnswer?.id ? "selected" : ""}`}
-                      onClick={() => chooseAnswer(answer.id)}
-                    >
-                      <span className="answer-avatar">
-                        {answer.author.slice(0, 1)}
-                      </span>
-                      <span>
-                        <strong>{answer.author}</strong>
-                        <small>{answer.excerpt || answer.title}</small>
-                      </span>
-                      <ChevronRight size={15} />
-                    </button>
-                  ))}
-                </div>
-                <button
-                  className="primary-button enter-button"
-                  disabled={!selectedAnswer}
-                  onClick={() => setDepth(2)}
-                >
-                  走近这束光 · 阅读
-                  <ArrowUpRight size={17} />
-                </button>
-                <div className="panel-actions">
-                  <button onClick={toggleSave}>
-                    {isSaved ? <Check size={15} /> : <Backpack size={15} />}
-                    {isSaved ? "已收入行囊" : "收入行囊"}
-                    <kbd>E</kbd>
-                  </button>
-                  <button onClick={openReflection}>
-                    <PenLine size={15} />
-                    留下思考<kbd>R</kbd>
-                  </button>
-                </div>
-              </>
-            )}
-          </aside>
-        )}
-
-        {!loading && selectedAnswer && level === 2 && (
-          <aside
-            className={`article-panel glass-panel ${readerExpanded ? "expanded" : ""}`}
-            aria-label="文章阅读"
-          >
-            <div className="article-toolbar">
-              <button className="text-button" onClick={() => setDepth(1)}>
-                <ArrowLeft size={15} />
-                返回观点星系
-              </button>
-              <button
-                className="text-button"
-                onClick={() => setReaderExpanded((value) => !value)}
-                aria-label={readerExpanded ? "收起阅读区域" : "展开阅读区域"}
-              >
-                {readerExpanded ? <Minimize size={14} /> : <Expand size={14} />}
-                {readerExpanded ? "收起阅读" : "展开阅读"}
-              </button>
-            </div>
-            <div className="article-scroll" key={selectedAnswer.id}>
-              <div className="eyebrow">A MOMENT TO THINK</div>
-              <h2>{selectedAnswer.title}</h2>
-              <div className="article-author">
-                <span className="answer-avatar">
-                  {selectedAnswer.author.slice(0, 1)}
-                </span>
-                <span>
-                  <strong>{selectedAnswer.author}</strong>
-                  <small>
-                    知乎 ·{" "}
-                    {selectedAnswer.workId
-                      ? "公开知识 · 正文节选"
-                      : selectedAnswer.isExcerpt
-                        ? "搜索摘要"
-                        : "原文内容"}
-                  </small>
-                </span>
-                {selectedAnswer.votes !== undefined && (
-                  <span className="votes">{selectedAnswer.votes} 赞同</span>
-                )}
-              </div>
-              {selectedAnswer.isExcerpt && (
-                <div className="excerpt-notice">
-                  <Info size={15} />
+        {!loading &&
+          (answerLoading ||
+            highlightLoading ||
+            answerError ||
+            highlightError) && (
+            <div className="orbit-status" role="status">
+              {answerLoading || highlightLoading ? (
+                <>
+                  <LoaderCircle className="spinning" size={13} />
                   <span>
-                    {selectedAnswer.workId
-                      ? "知乎公开接口提供的正文节选，内容可能在段落中截断。"
-                      : "当前内容为搜索摘要，可前往知乎阅读完整内容。"}
+                    {answerLoading
+                      ? "正在寻找这个问题下的回答"
+                      : "正在筛选原文片段"}
                   </span>
-                </div>
-              )}
-              <p className="reading-hint">
-                <Quote size={13} />
-                点选一个段落，按 R 留下你的思考
-              </p>
-              {detailLoading && (
-                <div className="inline-status">
-                  <LoaderCircle size={17} className="spinning" />
-                  正在读取正文…
-                </div>
-              )}
-              {detailError && (
-                <div className="excerpt-notice">
-                  {detailError}
+                </>
+              ) : (
+                <>
+                  <Info size={14} />
+                  <span>{level === 1 ? answerError : highlightError}</span>
                   <button
-                    className="text-button"
-                    onClick={() => setDetailRetry((value) => value + 1)}
+                    onClick={() =>
+                      level === 1
+                        ? setAnswerRetry((value) => value + 1)
+                        : setHighlightRetry((value) => value + 1)
+                    }
                   >
                     重试
                   </button>
-                </div>
+                </>
               )}
-              <div className="article-body">
-                {selectedAnswer.paragraphs.length ? (
-                  selectedAnswer.paragraphs.map((paragraph, index) => (
-                    <button
-                      className={`article-paragraph ${selectedParagraph === index ? "selected" : ""}`}
-                      key={`${selectedAnswer.id}-${index}`}
-                      onClick={() =>
-                        setSelectedParagraph(
-                          selectedParagraph === index ? null : index,
-                        )
-                      }
-                      aria-label={`选中第 ${index + 1} 段`}
-                      aria-pressed={selectedParagraph === index}
-                    >
-                      <span className="paragraph-number">
-                        {number(index + 1)}
-                      </span>
-                      {paragraph}
-                    </button>
-                  ))
-                ) : (
-                  <p>此内容暂未提供正文，请访问来源页面阅读。</p>
-                )}
-              </div>
-              {selectedAnswer.url && (
-                <a
-                  className="original-link"
-                  href={selectedAnswer.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {selectedAnswer.workId
-                    ? "查看知乎官方内容来源"
-                    : "阅读知乎原文"}
-                  <ArrowUpRight size={15} />
-                </a>
-              )}
-              <div className="article-end">
-                ✦<span>每一次停留，都让你的宇宙更辽阔。</span>
-              </div>
             </div>
-            <div className="article-footer">
-              <button
-                className={`primary-button ${isSaved ? "saved" : ""}`}
-                onClick={toggleSave}
-              >
-                {isSaved ? <Check size={16} /> : <Backpack size={16} />}
-                {isSaved ? "已收入行囊" : "收藏这束光"}
-                <kbd>E</kbd>
-              </button>
-              <button className="secondary-button" onClick={openReflection}>
-                <PenLine size={16} />
-                思考<kbd>R</kbd>
-              </button>
-            </div>
-          </aside>
-        )}
-
-        <div className="left-bottom">
+          )}
+        <div className="universe-navigation">
+          {level > 0 && (
+            <button
+              className="back-orbit"
+              onClick={() => changeDepth(level - 1)}
+              aria-label="返回上一层"
+            >
+              <ArrowLeft size={17} />
+              <span>返回</span>
+            </button>
+          )}
           <button
             className={`map-toggle ${showMap ? "selected" : ""}`}
             onClick={() => setShowMap((value) => !value)}
+            aria-label="星海图谱"
+            title="星海图谱"
           >
-            <Map size={16} />
-            <span>星海图谱</span>
-            <ChevronRight size={13} />
+            <Map size={17} />
           </button>
           {showMap && (
             <div className="minimap glass-panel">
               <div className="minimap-title">
-                <span>选择一个坐标</span>
-                <span>{questions.length} 个主题</span>
+                <span>选择星系</span>
+                <IconButton
+                  label="关闭星海图谱"
+                  onClick={() => setShowMap(false)}
+                >
+                  <X size={13} />
+                </IconButton>
               </div>
               {questions.map((question, index) => (
                 <button
                   key={question.id}
                   onClick={() => {
                     chooseQuestion(question.id);
-                    setDepth(0);
+                    changeDepth(1);
+                    setShowMap(false);
                   }}
                   className={
-                    question.id === selectedQuestion?.id ? "selected" : ""
+                    selectedQuestion?.id === question.id ? "selected" : ""
                   }
                 >
                   <span style={{ color: question.color }}>
@@ -1108,124 +1081,85 @@ export default function App() {
               ))}
             </div>
           )}
-          <div className="legend">
-            <span className="legend-glow" />
-            <span>
-              {query
-                ? "星光越亮，与你的问题越相关"
-                : "选择一束星光，发现新的方向"}
-            </span>
-          </div>
-          <div className="source-status" title={data?.notice}>
-            <span className="status-dot" />
-            <span>
-              {loading
-                ? "正在建立连接"
-                : data?.source === "zhihu-search"
-                  ? "知乎搜索 · 实时内容"
-                  : data?.source === "zhihu-cache"
-                    ? "知乎公开知识 · 本地快照"
-                    : "知乎公开知识 · 发现模式"}
-            </span>
-            <button onClick={() => setDrawer("help")} aria-label="内容来源说明">
-              <Info size={12} />
+        </div>
+        {level > 0 && selectedQuestion && (
+          <div className="context-actions" aria-label="当前内容操作">
+            <button
+              aria-label={isSaved ? "取消收藏当前内容" : "收藏当前内容"}
+              onClick={toggleSave}
+            >
+              {isSaved ? <Check size={15} /> : <Backpack size={15} />}
+              <span>{isSaved ? "已收藏" : "收藏"}</span>
+              <kbd>E</kbd>
             </button>
+            <i />
+            <button aria-label="留下思考" onClick={openReflection}>
+              <PenLine size={15} />
+              <span>
+                {selectedParagraph !== null && level === 2
+                  ? "段落思考"
+                  : "思考"}
+              </span>
+              <kbd>R</kbd>
+            </button>
+            {level === 2 && (
+              <>
+                <i />
+                <button aria-label="打开原文阅览" onClick={() => openReader()}>
+                  <BookOpen size={15} />
+                  <span>原文</span>
+                </button>
+              </>
+            )}
           </div>
-        </div>
-
-        <div className="bottom-center">
-          <div className="scroll-prompt">
-            <Mouse size={15} />
-            <span>
-              {flightMode
-                ? "W A S D 移动 · 拖动转向 · F 退出飞行"
-                : level === 0
-                  ? "滚动鼠标，向一个问题靠近"
-                  : level === 1
-                    ? "继续滚动，让一个观点清晰起来"
-                    : "向外滚动，带着思考继续漫游"}
-            </span>
-            <ArrowDown size={13} />
-          </div>
-          <nav className="depth-navigation" aria-label="探索纵深">
-            {depthNames.map((name, index) => (
-              <button
-                key={name}
-                className={level === index ? "active" : ""}
-                onClick={() => setDepth(index)}
-                disabled={
-                  (index > 0 && !selectedQuestion) ||
-                  (index === 2 && !selectedAnswer)
-                }
-              >
-                <span className="depth-dot">
-                  {index === 0 ? (
-                    <Orbit size={17} />
-                  ) : index === 1 ? (
-                    <Sparkles size={17} />
-                  ) : (
-                    <span>✦</span>
-                  )}
-                </span>
-                {name}
-                {index < 2 && (
-                  <ChevronRight className="depth-chevron" size={12} />
-                )}
-              </button>
-            ))}
-          </nav>
-        </div>
-
+        )}
         <div className="scene-tools">
           <IconButton
             label={flightMode ? "退出自由飞行 (F)" : "自由飞行 (F)"}
             active={flightMode}
             onClick={() => setFlightMode((value) => !value)}
           >
-            <Navigation size={18} />
+            <Navigation size={17} />
           </IconButton>
           <IconButton
             label="重置视角"
             onClick={() => {
               setResetToken((value) => value + 1);
-              setDepth(0);
+              changeDepth(0);
             }}
           >
-            <RefreshCw size={17} />
+            <RefreshCw size={16} />
           </IconButton>
           <IconButton
             label={fullscreen ? "退出全屏" : "进入全屏"}
             onClick={toggleFullscreen}
           >
-            {fullscreen ? <Minimize size={17} /> : <Expand size={17} />}
+            {fullscreen ? <Minimize size={16} /> : <Expand size={16} />}
           </IconButton>
-          <span className="tool-separator" />
+          <IconButton
+            label="内容与模型连接"
+            onClick={() => setDrawer("connection")}
+            className={connection?.configured ? "connection-live" : ""}
+          >
+            <Cable size={17} />
+          </IconButton>
           <IconButton label="探索指南" onClick={() => setDrawer("help")}>
             <span className="help-icon">?</span>
           </IconButton>
         </div>
-        <div className="depth-scale">
-          <span>远</span>
-          <input
-            type="range"
-            aria-label="探索深度"
-            min="0"
-            max={selectedAnswer ? 2 : selectedQuestion ? 1 : 0}
-            step="0.01"
-            value={depth}
-            onChange={(event) => setDepth(Number(event.target.value))}
-          />
-          <span>近</span>
-        </div>
-        <footer className="app-footer">
-          <span>WANDER WITH CURIOSITY.</span>
-          <span>
-            让知识相遇，让思考生长 <span className="footer-star">✦</span>
-          </span>
-          <span>EXPLORE AT YOUR OWN PACE</span>
-        </footer>
       </div>
-
+      {readerOpen && selectedAnswer && (
+        <ReadingRoom
+          answer={selectedAnswer}
+          selectedParagraph={selectedParagraph}
+          saved={isSaved}
+          onClose={() => setReaderOpen(false)}
+          onSave={toggleSave}
+          onReflect={openReflection}
+          onSelectParagraph={selectParagraph}
+          dimmed={!!reflectionTarget}
+        />
+      )}
       {drawer && (
         <Modal
           title={
@@ -1235,7 +1169,9 @@ export default function App() {
                 ? "探索足迹"
                 : drawer === "return"
                   ? "带着星光，回到出发的地方"
-                  : "你的星际旅行指南"
+                  : drawer === "connection"
+                    ? "内容与模型连接"
+                    : "探索指南"
           }
           onClose={() => setDrawer(null)}
           className={
@@ -1428,7 +1364,7 @@ export default function App() {
                 不用急着找到答案，先享受靠近的过程。
               </p>
               <div className="help-levels">
-                {["问题汇成星海", "回答形成星系", "文章成为恒星"].map(
+                {["问题汇成星海", "回答围绕问题", "段落围绕文章"].map(
                   (text, index) => (
                     <div key={text}>
                       <span>0{index + 1}</span>
@@ -1438,7 +1374,7 @@ export default function App() {
                           [
                             "从远处看见相关主题，星光亮度随语义相关度变化。",
                             "走近一个问题，选择作者的观点继续探索。",
-                            "阅读段落、收集文章，为具体的文字留下思考。",
+                            "在文章周围选择原文片段；点击中央标题打开原文阅览。",
                           ][index]
                         }
                       </p>
@@ -1450,7 +1386,7 @@ export default function App() {
                 {[
                   ["滚轮 / 双指缩放", "调整探索纵深"],
                   ["拖动鼠标 / 单指滑动", "转动视角"],
-                  ["点击星体 · 点击进入", "选择并飞向内容"],
+                  ["点击 / 双击星体", "选择 / 进入内容"],
                   ["F · W A S D", "切换飞行 · 移动"],
                   ["E / R", "收藏 / 留下思考"],
                   ["Esc / /", "返回上一层 / 搜索"],
@@ -1478,11 +1414,93 @@ export default function App() {
                       "内容来自知乎官方接口。公开知识模式浏览赛事内容；配置服务端知乎凭证后可使用站内搜索。搜索摘要不会被当作全文呈现。"}
                   </p>
                   <p>
-                    公开知识作品以一个主题、一篇原文呈现。输入问题后，相关度由结果排序与关键词匹配计算；自由漫游时的初始亮度按内容顺序分配。收藏和思考仅保存在本机浏览器。
+                    公开模式按主题聚合多篇真实知乎作品；它们是相关原文，不冒充同一个问题的回答。连接知乎搜索后，按真实问题归属展开回答。精选文字均可定位到原段落。收藏与思考保存在本机浏览器。
                   </p>
                 </div>
               </div>
             </>
+          )}
+          {drawer === "connection" && (
+            <div className="connection-panel">
+              <div className="connection-item">
+                <div>
+                  <span
+                    className={`connection-dot ${connection?.configured ? "connected" : ""}`}
+                  />
+                  <strong>知乎知识源</strong>
+                </div>
+                <span>
+                  {connection?.configured ? "搜索已配置" : "公开知识模式"}
+                </span>
+              </div>
+              <p className="connection-description">
+                {connection?.configured
+                  ? "输入问题检索真实知乎内容。进入星系时，继续检索属于这个问题的回答，保留作者和原文链接。"
+                  : `当前有 ${connection?.publicCount ?? 10} 篇知乎公开作品，可按主题深入阅读。配置 Access Secret 后可搜索任意问题及其回答。`}
+              </p>
+              {!connection?.configured && (
+                <div className="connection-setup">
+                  <a
+                    href="https://developer.zhihu.com/profile"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    获取知乎 Access Secret
+                    <ArrowUpRight size={14} />
+                  </a>
+                  <p>
+                    在服务端 .env 中设置
+                    ZHIHU_ACCESS_SECRET，随后重启服务。凭证不会进入浏览器。
+                  </p>
+                </div>
+              )}
+              <div className="connection-item model-connection">
+                <div>
+                  <span
+                    className={`connection-dot ${connection?.model?.configured ? "connected" : ""}`}
+                  />
+                  <strong>原文片段筛选</strong>
+                </div>
+                <span>
+                  {connection?.model?.configured
+                    ? (connection.model.name ?? "模型已配置")
+                    : "原文自动筛选"}
+                </span>
+              </div>
+              <p className="connection-description">
+                {connection?.model?.configured
+                  ? "模型从已有原文中选择片段。所有引文均经过来源位置校验，失败时仍可阅读和使用原文筛选。"
+                  : "根据问题关键词、信息量和段落差异选择原文。也可连接本地小模型或知乎直答快速模型，提高片段选择质量。"}
+              </p>
+              {!connection?.model?.configured && (
+                <details className="connection-model-guide">
+                  <summary>连接小模型</summary>
+                  <p>
+                    本地模型：在服务端配置 MODEL_BASE_URL、MODEL_NAME 和可选
+                    MODEL_API_KEY。支持 Ollama 的兼容接口。
+                  </p>
+                  <p>
+                    知乎直答：已有知乎凭证时，在 .env 设置
+                    ZHIHU_MODEL_ENABLED=true，使用官方快速模型。两种方式均按文章请求并缓存结果。
+                  </p>
+                </details>
+              )}
+              {connectionError && (
+                <p className="connection-error" role="status">
+                  {connectionError}
+                </p>
+              )}
+              <div className="connection-footer">
+                <span>搜索摘要与正文节选均会标明</span>
+                <button
+                  className="secondary-button"
+                  onClick={() => setConnectionRetry((value) => value + 1)}
+                >
+                  <RefreshCw size={14} />
+                  刷新状态
+                </button>
+              </div>
+            </div>
           )}
           {drawer === "return" && (
             <>
@@ -1578,5 +1596,61 @@ function EmptyState({
       <h3>{title}</h3>
       <p>{text}</p>
     </div>
+  );
+}
+
+async function readResponse<T>(response: Response): Promise<T> {
+  const result = await response.json();
+  if (!response.ok)
+    throw new Error(
+      typeof result.message === "string"
+        ? result.message
+        : "内容暂时无法读取，请稍后重试",
+    );
+  return result as T;
+}
+
+function locateStop(
+  questions: Question[],
+  stop: { questionId: string; answerId?: string },
+): { question: Question; answerId?: string } | undefined {
+  const direct = questions.find((question) => question.id === stop.questionId);
+  if (
+    direct &&
+    (!stop.answerId ||
+      direct.answers.some((answer) => answer.id === stop.answerId))
+  )
+    return { question: direct, answerId: stop.answerId };
+  // Previous versions used a public work ID as its parent question ID. Match the
+  // exact source ID in the new topic hierarchy, never a merely similar title.
+  if (/^knowledge-\d+$/.test(stop.questionId)) {
+    const answerId = stop.answerId ?? stop.questionId;
+    const topic = questions.find(
+      (question) =>
+        question.kind === "topic" &&
+        question.answers.some((answer) => answer.id === answerId),
+    );
+    if (topic) return { question: topic, answerId };
+  }
+  return undefined;
+}
+
+function answerSourceKey(answer: Answer): string {
+  return JSON.stringify([answer.title, answer.paragraphs]);
+}
+function quotesMatch(
+  answer: Answer,
+  response: HighlightResponse | undefined,
+): boolean {
+  return (
+    !!response &&
+    Array.isArray(response.highlights) &&
+    response.highlights.every(
+      (highlight) =>
+        Number.isSafeInteger(highlight.paragraphIndex) &&
+        typeof highlight.text === "string" &&
+        highlight.text.length > 0 &&
+        answer.paragraphs[highlight.paragraphIndex]?.includes(highlight.text),
+    )
   );
 }

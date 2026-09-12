@@ -1,5 +1,12 @@
 export type SourceMode = "zhihu-search" | "zhihu-public" | "zhihu-cache";
 
+export interface Highlight {
+  id: string;
+  text: string;
+  paragraphIndex: number;
+  label?: string;
+}
+
 export interface Answer {
   id: string;
   title: string;
@@ -11,6 +18,8 @@ export interface Answer {
   votes?: number;
   isExcerpt: boolean;
   workId?: string;
+  highlights?: Highlight[];
+  highlightMethod?: "extractive" | "model";
 }
 
 export interface Question {
@@ -22,6 +31,8 @@ export interface Question {
   color: string;
   answers: Answer[];
   url?: string;
+  kind?: "question" | "topic" | "article";
+  answersExpanded?: boolean;
 }
 
 export interface ExploreResponse {
@@ -31,6 +42,29 @@ export interface ExploreResponse {
   source: SourceMode;
   notice?: string;
   fetchedAt: string;
+}
+
+export interface QuestionResponse {
+  question: Question;
+  notice?: string;
+}
+
+export interface HighlightResponse {
+  answerId: string;
+  highlights: Highlight[];
+  method: "extractive" | "model";
+  notice?: string;
+}
+
+export interface ConnectionStatus {
+  ok: boolean;
+  configured: boolean;
+  publicCount: number;
+  model: {
+    configured: boolean;
+    provider: "compatible" | "zhihu" | "extractive";
+    name?: string;
+  };
 }
 
 export interface SavedItem {

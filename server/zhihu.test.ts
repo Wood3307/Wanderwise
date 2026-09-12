@@ -29,6 +29,10 @@ test('search groups real question IDs and preserves distinct authors, articles, 
   assert.equal(question.answers[0].isExcerpt, true);
   assert.equal(question.answers[0].votes, 4);
   assert.equal(results.find((entry) => entry.id === 'article-200')?.answers[0].author, '作者未提供');
+  assert.equal(results.find((entry) => entry.id === 'article-200')?.kind, 'article');
+  assert.equal(question.kind, 'question');
+  assert.equal(question.answersExpanded, false);
+  assert.ok(question.answers.every((answer) => answer.highlights?.every((highlight) => answer.paragraphs[highlight.paragraphIndex].includes(highlight.text))));
 });
 
 test('answer-only URLs join matching real titles; conflicting question IDs stay separate', () => {
@@ -60,9 +64,39 @@ test('public mode searches the real corpus and leaves unrelated searches empty',
   assert.equal(result[0].answers.length, 1);
   assert.equal(result[0].answers[0].author, '测试作者');
   assert.equal(result[0].answers[0].isExcerpt, true);
+  assert.equal(result[0].kind, 'topic');
+  assert.equal(result[0].answersExpanded, true);
+  assert.ok(result[0].keywords.includes('主题聚合'));
   assert.match(result[0].answers[0].url, /^https:\/\/api\.zhihu\.com\//);
   assert.ok(extractKeywords('大学生实习应该如何获取资源？').includes('实习'));
   assert.ok(!extractKeywords('大学生实习应该如何获取资源？').includes('如何'));
+});
+
+test('public topic filtering excludes unmatched works even when their topic matches', () => {
+  const corpus: PublicSnapshot = {
+    ...snapshot,
+    items: [...snapshot.items, { work_id: '124', title: '学习中的实践方法', description: '实践方法来自实际行动。' }],
+    details: { ...snapshot.details, '124': { work_id: '124', chapter_name: '学习中的实践方法', author_name: '另一作者', content: '实践方法来自实际行动。\n安排有价值的任务，再检查实践结果。' } },
+  };
+  const all = adaptPublic(corpus, '');
+  assert.equal(all.length, 1);
+  assert.equal(all[0].answers.length, 2);
+  const filtered = adaptPublic(corpus, '注意力');
+  assert.deepEqual(filtered.flatMap((question) => question.answers.map((answer) => answer.id)), ['knowledge-123']);
+  assert.equal(adaptPublic(corpus, '量子纠缠').length, 0);
+});
+
+test('answer labels use exact source quotes and keep standalone article titles', () => {
+  const content = '大家好，我是这篇回答的作者。\n建议学习时先制定具体目标，再安排实践与反馈，以便判断学习方法是否有效。';
+  const result = adaptSearch([
+    { ...answerItem, Title: '如何学习？ - 知乎', ContentText: content },
+    { ...answerItem, ContentType: 'Article', ContentID: '200', Url: 'https://zhuanlan.zhihu.com/p/200', Title: '实践的方法 - 知乎', ContentText: content },
+  ], '学习');
+  const question = result.find((entry) => entry.kind === 'question')!;
+  assert.equal(question.title, '如何学习？');
+  assert.match(question.answers[0].title, /^建议学习/);
+  assert.ok(content.includes(question.answers[0].title.replace(/…$/, '')));
+  assert.equal(result.find((entry) => entry.kind === 'article')?.answers[0].title, '实践的方法');
 });
 
 test('authenticated search sends documented server headers and caches repeated queries', async () => {
@@ -84,6 +118,83 @@ test('authenticated search sends documented server headers and caches repeated q
   assert.deepEqual(await service.explore('学习 & 工作'), first);
   assert.equal(calls, 1);
   assert.ok(!JSON.stringify(first).includes('test-only-secret'));
+});
+
+test('entering a question expands same-question answers once, preserves authors and rejects other questions', async () => {
+  const requests: string[] = [];
+  const service = new ZhihuService({ snapshot, secret: 'secret', fetchImpl: async (input) => {
+    const query = new URL(String(input)).searchParams.get('Query')!;
+    requests.push(query);
+    if (query === '学习') return json({ Code: 0, Data: { Items: [{ ...answerItem, Title: '如何学习？ - 知乎' }] } });
+    assert.equal(query, '如何学习？');
+    return json({ Code: 0, Data: { Items: [
+      answerItem,
+      { ...answerItem, Title: '来源中同一问题的另一种显示标题', ContentID: '102', AuthorName: '乙', Url: 'https://www.zhihu.com/question/50/answer/102' },
+      { ...answerItem, Title: '如何学习? - 知乎', ContentID: '103', AuthorName: '丙', Url: 'https://www.zhihu.com/answer/103' },
+      { ...answerItem, ContentID: '104', AuthorName: '其他问题作者', Url: 'https://www.zhihu.com/question/51/answer/104' },
+      { ...answerItem, ContentType: 'Article', ContentID: '105', Url: 'https://zhuanlan.zhihu.com/p/105' },
+      { ...answerItem, Title: '学习有什么价值？', ContentID: '106', Url: 'https://www.zhihu.com/answer/106' },
+      { ...answerItem, ContentID: '999', AuthorName: '乙', Url: 'https://www.zhihu.com/question/50/answer/102' },
+    ] } });
+  } });
+  assert.equal((await service.explore('学习')).questions[0].answers.length, 1);
+  const [first, concurrent] = await Promise.all([service.question('question-50', '学习'), service.question('question-50', '学习')]);
+  assert.deepEqual(concurrent, first);
+  assert.deepEqual(requests, ['学习', '如何学习？']);
+  assert.equal(first.question.answersExpanded, true);
+  assert.deepEqual(first.question.answers.map((answer) => answer.id).sort(), ['answer-101', 'answer-102', 'answer-103']);
+  assert.deepEqual(first.question.answers.map((answer) => answer.author).sort(), ['丙', '乙', '甲'].sort());
+  assert.match(first.notice ?? '', /补充 2 篇同题回答/);
+  assert.deepEqual(await service.question('question-50', '学习'), first);
+  assert.equal((await service.explore('学习')).questions[0].answers.length, 3);
+  assert.equal((await service.findAnswer('answer-103', 'question-50', '学习')).author, '丙');
+  await assert.rejects(service.findAnswer('answer-104', 'question-50', '学习'), (error: unknown) => error instanceof ApiError && error.status === 404);
+  await assert.rejects(service.question('question-51', '学习'), (error: unknown) => error instanceof ApiError && error.status === 404);
+  assert.equal(requests.length, 2);
+});
+
+test('empty same-question expansion remains empty and is cached without adding unrelated content', async () => {
+  let calls = 0;
+  const service = new ZhihuService({ snapshot, secret: 'secret', fetchImpl: async () => {
+    calls++;
+    return json({ Code: 0, Data: { Items: calls === 1
+      ? [{ ...answerItem, ContentType: 'Question', ContentText: '', ContentID: '50', Url: 'https://www.zhihu.com/question/50' }]
+      : [{ ...answerItem, Url: 'https://www.zhihu.com/question/51/answer/101' }] } });
+  } });
+  const first = await service.question('question-50', '学习');
+  assert.equal(first.question.answers.length, 0);
+  assert.equal(first.question.answersExpanded, true);
+  assert.match(first.notice ?? '', /未返回可确认属于该问题/);
+  assert.deepEqual(await service.question('question-50', '学习'), first);
+  assert.equal(calls, 2);
+});
+
+test('title-only expansion does not merge conflicting known question IDs', async () => {
+  let calls = 0;
+  const service = new ZhihuService({ snapshot, secret: 'secret', fetchImpl: async () => {
+    calls++;
+    return json({ Code: 0, Data: { Items: calls === 1
+      ? [{ ...answerItem, Url: 'https://www.zhihu.com/answer/101' }]
+      : [answerItem, { ...answerItem, ContentID: '102', Url: 'https://www.zhihu.com/question/51/answer/102' }, { ...answerItem, ContentID: '103', Url: 'https://www.zhihu.com/answer/103' }] } });
+  } });
+  const question = (await service.explore('学习')).questions[0];
+  assert.match(question.id, /^title-/);
+  const expanded = await service.question(question.id, '学习');
+  assert.deepEqual(expanded.question.answers.map((answer) => answer.id).sort(), ['answer-101', 'answer-103']);
+});
+
+test('failed expansion preserves initial answers and returns the actual upstream limit condition', async () => {
+  let calls = 0;
+  const service = new ZhihuService({ snapshot, secret: 'secret', fetchImpl: async () => {
+    calls++;
+    return calls === 1 ? json({ Code: 0, Data: { Items: [answerItem] } }) : json({ Code: 30001, Message: 'private detail' });
+  } });
+  await service.explore('学习');
+  await assert.rejects(service.question('question-50', '学习'), (error: unknown) => error instanceof ApiError && error.status === 429 && error.code === 'ZHIHU_RATE_LIMITED');
+  const retained = await service.explore('学习');
+  assert.equal(retained.questions[0].answers.length, 1);
+  assert.equal(retained.questions[0].answersExpanded, false);
+  assert.equal(calls, 2);
 });
 
 test('upstream authentication messages and transport failures never expose secrets', async () => {
@@ -141,9 +252,50 @@ test('simultaneous identical search requests share a bounded upstream request', 
   } });
   const first = service.explore('学习');
   const second = service.explore('学习');
+  await Promise.resolve();
   assert.equal(calls, 1);
   release();
   assert.deepEqual(await first, await second);
+});
+
+test('new authenticated searches are serialized and conservatively spaced while cache hits remain immediate', async () => {
+  let now = 1000;
+  let active = 0;
+  let maxActive = 0;
+  const starts: number[] = [];
+  const waits: number[] = [];
+  const service = new ZhihuService({ snapshot, secret: 'secret', now: () => now, wait: async (milliseconds) => { waits.push(milliseconds); now += milliseconds; }, fetchImpl: async () => {
+    starts.push(now);
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await Promise.resolve();
+    active--;
+    return json({ Code: 0, Data: { Items: [answerItem] } });
+  } });
+  await Promise.all([service.explore('学习甲'), service.explore('学习乙'), service.explore('学习丙')]);
+  assert.equal(maxActive, 1);
+  assert.deepEqual(starts, [1000, 2100, 3200]);
+  assert.deepEqual(waits, [1100, 1100]);
+  await service.explore('学习甲');
+  assert.equal(starts.length, 3);
+});
+
+test('upstream rate limiting cancels queued calls and blocks new calls for a local cooldown without retrying', async () => {
+  let now = 1000;
+  let calls = 0;
+  const service = new ZhihuService({ snapshot, secret: 'secret', now: () => now, wait: async (milliseconds) => { now += milliseconds; }, fetchImpl: async () => {
+    calls++;
+    return calls === 1 ? json({ Code: 30001, Message: 'private quota detail' }) : json({ Code: 0, Data: { Items: [answerItem] } });
+  } });
+  const queued = await Promise.allSettled([service.explore('学习甲'), service.explore('学习乙'), service.explore('学习丙')]);
+  assert.ok(queued.every((result) => result.status === 'rejected' && result.reason instanceof ApiError && result.reason.code === 'ZHIHU_RATE_LIMITED'));
+  assert.equal(calls, 1);
+  await assert.rejects(service.explore('学习丁'), (error: unknown) => error instanceof ApiError && error.status === 429);
+  assert.equal(calls, 1);
+  now += 60_000;
+  assert.equal(calls, 1);
+  assert.equal((await service.explore('学习甲')).source, 'zhihu-search');
+  assert.equal(calls, 2);
 });
 
 test('oversized upstream payload is rejected before parsing or display', async () => {
@@ -160,8 +312,19 @@ test('bundled snapshot has traceable real authors and excerpts for offline start
   const service = new ZhihuService({ snapshot: bundled, fetchImpl: async () => { throw new Error('offline'); } });
   const response = await service.explore('');
   assert.equal(response.source, 'zhihu-cache');
-  assert.equal(response.questions.length, 10);
-  assert.ok(response.questions.every((question) => question.answers[0].paragraphs.length > 1 && question.answers[0].isExcerpt));
+  assert.equal(response.questions.length, 3);
+  const answers = response.questions.flatMap((question) => question.answers);
+  assert.equal(answers.length, 10);
+  assert.equal(new Set(answers.map((answer) => answer.id)).size, 10);
+  assert.ok(response.questions.every((question) => question.kind === 'topic' && question.answersExpanded && question.answers.length >= 2));
+  for (const answer of answers) {
+    assert.equal(answer.author, bundled.details[answer.workId!].author_name);
+    assert.equal(answer.title, bundled.details[answer.workId!].chapter_name);
+    assert.ok(answer.paragraphs.length > 1 && answer.isExcerpt);
+    assert.ok(answer.highlights!.length > 1);
+    assert.ok(answer.highlights!.every((highlight) => answer.paragraphs[highlight.paragraphIndex].includes(highlight.text)));
+  }
+  assert.match(response.notice ?? '', /并非同一知乎问题/);
 });
 
 test('HTTP API validates queries, reports configuration safely, and returns JSON errors', async (context) => {
@@ -173,10 +336,25 @@ test('HTTP API validates queries, reports configuration safely, and returns JSON
   assert.ok(address && typeof address !== 'string');
   const origin = `http://127.0.0.1:${address.port}`;
   const health = await (await fetch(`${origin}/api/health`)).json();
-  assert.deepEqual(health, { ok: true, configured: true, publicCount: 1 });
+  assert.equal(health.ok, true);
+  assert.equal(health.configured, true);
+  assert.equal(health.publicCount, 1);
+  assert.equal(typeof health.model.configured, 'boolean');
   assert.equal((await fetch(`${origin}/api/explore?q=a&q=b`)).status, 400);
   assert.equal((await fetch(`${origin}/api/explore?q=${'a'.repeat(161)}`)).status, 400);
   assert.equal((await fetch(`${origin}/api/knowledge/999`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/questions/question-50?q=a&q=b`)).status, 400);
+  assert.equal((await fetch(`${origin}/api/questions/invalid_id`)).status, 400);
+  assert.equal((await fetch(`${origin}/api/answers/knowledge-123/highlights`)).status, 400);
+  assert.equal((await fetch(`${origin}/api/answers/knowledge-123/highlights?questionId=topic-learning&questionId=topic-career`)).status, 400);
+  assert.equal((await fetch(`${origin}/api/answers/knowledge-123/highlights?questionId=topic-career`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/answers/knowledge-124/highlights?questionId=topic-learning`)).status, 404);
+  const topic = await (await fetch(`${origin}/api/questions/topic-learning`)).json();
+  assert.equal(topic.question.answers[0].id, 'knowledge-123');
+  const highlights = await (await fetch(`${origin}/api/answers/knowledge-123/highlights?questionId=topic-learning`)).json();
+  assert.equal(highlights.answerId, 'knowledge-123');
+  assert.ok(highlights.highlights.every((highlight: { text: string }) => snapshot.details['123'].content!.includes(highlight.text)));
+  assert.equal((await fetch(`${origin}/api/answers/knowledge-123/highlights`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'untrusted arbitrary content', questionId: 'topic-learning' }) })).status, 404);
   const missing = await fetch(`${origin}/api/missing`);
   assert.equal(missing.status, 404);
   assert.match(missing.headers.get('content-type') || '', /application\/json/);

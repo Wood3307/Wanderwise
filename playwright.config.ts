@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL;
-const baseURL = externalBaseURL || 'http://127.0.0.1:5173';
+const baseURL = externalBaseURL || 'http://127.0.0.1:5188';
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 
 export default defineConfig({

@@ -1,74 +1,133 @@
-.galaxy-scene { position: absolute; inset: 0; overflow: hidden; isolation: isolate; background: #080c14; color: #e8edf0; }
-.galaxy-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; outline: none; z-index: 1; }
-.galaxy-canvas:focus-visible { outline: 1px solid #c6b78a; outline-offset: -4px; }
-.galaxy-is-dragging .galaxy-canvas { cursor: grabbing; }
-.galaxy-nebula { position: absolute; pointer-events: none; z-index: 0; border-radius: 50%; filter: blur(60px); }
-.galaxy-nebula-one { width: 75%; height: 62%; top: 7%; left: 13%; transform: rotate(-26deg); background: radial-gradient(ellipse, #17242d52 0%, #17203527 40%, transparent 70%); }
-.galaxy-nebula-two { width: 42%; height: 50%; top: 12%; left: 32%; background: radial-gradient(ellipse, #28312e25, transparent 70%); }
-.galaxy-nebula-three { width: 36%; height: 55%; top: 39%; left: 47%; background: radial-gradient(ellipse, #30302920, transparent 70%); }
-.galaxy-vignette { position: absolute; inset: 0; z-index: 2; pointer-events: none; background: radial-gradient(ellipse at 52% 45%, transparent 28%, #080c141a 63%, #06091085 100%); }
-.galaxy-labels { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
-.galaxy-label { position: absolute; top: 0; left: 0; width: 0; height: 0; visibility: hidden; will-change: transform; transition: opacity .5s; --galaxy-star-color: #a3c6dd; }
-.galaxy-star-marker { position: absolute; width: 24px; height: 24px; margin: -12px 0 0 -12px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 50%; background: transparent; color: var(--galaxy-star-color); pointer-events: auto; cursor: pointer; transition: border-color .3s, box-shadow .3s; }
-.galaxy-star-marker span { width: 4px; height: 4px; border-radius: 50%; background: #edf2e9; box-shadow: 0 0 7px 3px var(--galaxy-star-color), 0 0 21px 8px color-mix(in srgb, var(--galaxy-star-color) 20%, transparent); }
-.galaxy-label-selected .galaxy-star-marker { border-color: color-mix(in srgb, var(--galaxy-star-color) 56%, transparent); box-shadow: 0 0 0 6px color-mix(in srgb, var(--galaxy-star-color) 6%, transparent); }
-.galaxy-label-selected .galaxy-star-marker::after { content: ''; position: absolute; width: 36px; height: 36px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--galaxy-star-color) 17%, transparent); }
-.galaxy-label-body { position: absolute; top: 0; left: 0; width: 216px; padding: 5px 0 8px; text-align: left; text-shadow: 0 2px 8px #04070d, 0 0 16px #04070d, 0 0 30px #04070d; animation: galaxy-text-arrive .7s both; }
-.galaxy-label-eyebrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; color: #93a2b3; font: 8px/1.2 'DM Sans', 'Noto Sans SC', sans-serif; letter-spacing: 1.9px; }
-.galaxy-label-eyebrow i { font-style: normal; color: #758a9a; letter-spacing: .4px; }
-.galaxy-label-eyebrow b { margin-left: 1px; color: #d5c698; font: 8px/1 'DM Sans', 'Noto Sans SC', sans-serif; letter-spacing: 1px; font-weight: 400; }
-.galaxy-label-title { max-width: 100%; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; padding: 0; margin: 0; border: 0; background: transparent; color: #cad5df; text-align: left; font: 400 13px/1.65 inherit; font-size: 13px; font-weight: 400; line-height: 1.65; letter-spacing: .4px; text-shadow: inherit; cursor: pointer; pointer-events: auto; transition: color .2s; }
-.galaxy-label-title:hover { color: #fff; }
-.galaxy-label-selected .galaxy-label-title { color: #edf0e8; font-size: 15px; }
-.galaxy-label-meta { display: flex; align-items: center; gap: 5px; margin-top: 8px; color: #81909f; font-size: 9px; line-height: 1.4; letter-spacing: .4px; white-space: nowrap; max-width: 216px; overflow: hidden; text-overflow: ellipsis; }
-.galaxy-relevance-bars { display: flex; align-items: end; height: 8px; gap: 2px; margin-right: 3px; }
-.galaxy-relevance-bars i { display: block; width: 2px; height: 4px; background: var(--galaxy-star-color); }
-.galaxy-relevance-bars i:nth-child(2) { height: 5px; }
-.galaxy-relevance-bars i:nth-child(3) { height: 6px; }
-.galaxy-relevance-bars i:nth-child(4) { height: 7px; }
-.galaxy-relevance-bars i:nth-child(5) { height: 8px; }
-.galaxy-label-dot { color: #5c6978; margin: 0 2px; }
-.galaxy-label-enter { display: flex; align-items: center; gap: 13px; pointer-events: auto; border: 0; background: transparent; padding: 8px 0 2px; color: #d7c99f; font-size: 10px; letter-spacing: 1px; cursor: pointer; text-shadow: inherit; opacity: 0; transform: translateY(3px); transition: opacity .2s, transform .2s; }
-.galaxy-label-enter span { font-size: 15px; line-height: 10px; }
-.galaxy-label:hover .galaxy-label-enter, .galaxy-label:focus-within .galaxy-label-enter, .galaxy-label-selected .galaxy-label-enter { opacity: 1; transform: translateY(0); }
-.galaxy-label-enter:hover { color: #fff3cd; }
-.galaxy-label button:focus-visible { outline: 1px solid #d9c696; outline-offset: 5px; border-radius: 2px; }
-.galaxy-label-article .galaxy-label-body { width: 280px; }
-.galaxy-label-article .galaxy-label-title { font-size: 21px; line-height: 1.7; }
-.galaxy-label-article .galaxy-label-meta { font-size: 10px; margin-top: 12px; }
-.galaxy-coordinates { position: absolute; z-index: 2; left: 50%; bottom: 184px; transform: translateX(-50%); display: flex; align-items: center; gap: 11px; pointer-events: none; color: #526070; font: 8px/1.4 Consolas, monospace; letter-spacing: 1.5px; }
-.galaxy-coordinates i { width: 14px; height: 1px; background: #37404c; }
-.galaxy-flight-hud { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
-.galaxy-reticle { position: absolute; top: 50%; left: 50%; width: 36px; height: 36px; transform: translate(-50%, -50%); border: 1px solid #c3d5d032; border-radius: 50%; }
-.galaxy-reticle::before, .galaxy-reticle::after { content: ''; position: absolute; top: 50%; left: 50%; background: #d3e0d9aa; transform: translate(-50%, -50%); }
-.galaxy-reticle::before { width: 12px; height: 1px; }
-.galaxy-reticle::after { height: 12px; width: 1px; }
-.galaxy-flight-caption { position: absolute; top: calc(50% + 40px); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; color: #aab9b3; font: 8px/1.4 'DM Sans', 'Noto Sans SC', sans-serif; letter-spacing: 1.5px; white-space: nowrap; }
-.galaxy-flight-caption i { width: 3px; height: 3px; border-radius: 50%; background: #b5caa8; }
-.galaxy-fallback-notice { position: absolute; z-index: 3; top: 150px; left: 350px; color: #cfbf95; font-size: 13px; letter-spacing: 2px; }
-.galaxy-fallback-notice span { display: block; margin-top: 9px; color: #8e9caa; font-size: 11px; letter-spacing: 1px; }
-.galaxy-is-fallback .galaxy-labels { top: 230px; left: 335px; right: 365px; bottom: 145px; display: grid; align-content: start; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 26px 30px; overflow-y: auto; padding: 10px 12px; pointer-events: auto; }
-.galaxy-is-fallback .galaxy-label { position: relative; width: 100%; min-height: 125px; visibility: visible !important; transform: none !important; opacity: 1 !important; padding-left: 22px; }
-.galaxy-is-fallback .galaxy-label-body { position: relative; transform: none !important; width: 100%; }
-.galaxy-is-fallback .galaxy-star-marker { left: 0; top: 30px; }
-.galaxy-is-fallback .galaxy-label-enter { opacity: 1; }
-@keyframes galaxy-text-arrive { from { opacity: 0; filter: blur(5px); } to { opacity: 1; filter: blur(0); } }
-.galaxy-reduced-motion *, .galaxy-reduced-motion *::before, .galaxy-reduced-motion *::after { animation: none !important; transition: none !important; }
-@media (max-width: 760px) {
-  .galaxy-label-body { width: 176px; }
-  .galaxy-label-title { font-size: 12px; }
-  .galaxy-label-selected .galaxy-label-title { font-size: 13px; }
-  .galaxy-label-meta { font-size: 8px; }
-  .galaxy-label-enter { opacity: 1; font-size: 9px; }
-  .galaxy-label-article .galaxy-label-body { width: 210px; }
-  .galaxy-label-article .galaxy-label-title { font-size: 17px; }
-  .galaxy-coordinates { display: none; }
-  .galaxy-fallback-notice { top: 326px; left: 26px; font-size: 10px; }
-  .galaxy-fallback-notice span { display: none; }
-  .galaxy-is-fallback .galaxy-labels { top: 356px; left: 25px; right: 25px; bottom: 360px; grid-template-columns: 1fr; gap: 14px; }
-  .galaxy-flight-caption { font-size: 7px; letter-spacing: .7px; }
+.galaxy-scene { position:absolute; inset:0; overflow:hidden; isolation:isolate; background:#070b12; color:#e8edf0; }
+.galaxy-canvas { position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:grab; outline:none; z-index:1; }
+.galaxy-canvas:focus-visible { outline:1px solid #c6b78a; outline-offset:-4px; }
+.galaxy-is-dragging .galaxy-canvas { cursor:grabbing; }
+.galaxy-nebula { position:absolute; pointer-events:none; z-index:0; border-radius:50%; filter:blur(55px); }
+.galaxy-nebula-one { width:80%; height:75%; top:5%; left:7%; transform:rotate(-26deg); background:radial-gradient(ellipse,#26364843, #17203519 40%,transparent 70%); }
+.galaxy-nebula-two { width:42%; height:50%; top:12%; left:32%; background:radial-gradient(ellipse,#28312e20,transparent 70%); }
+.galaxy-nebula-three { width:36%; height:55%; top:39%; left:47%; background:radial-gradient(ellipse,#30302918,transparent 70%); }
+.galaxy-vignette { position:absolute; inset:0; z-index:2; pointer-events:none; background:radial-gradient(ellipse at 50% 48%,transparent 35%,#06091020 65%,#0609108a 100%); }
+.galaxy-content-layer { position:absolute; inset:0; z-index:3; pointer-events:none; }
+.galaxy-content-exit { z-index:4; pointer-events:none!important; }
+.galaxy-content-exit * { pointer-events:none!important; }
+.galaxy-labels { position:absolute; inset:0; pointer-events:none; }
+.galaxy-label { position:absolute; width:0; height:0; --galaxy-star-color:#a3c6dd; --star-power:1; transition:opacity .4s; }
+.galaxy-content-0 .galaxy-label { visibility:visible; }
+.galaxy-star-marker { position:absolute; width:44px; height:44px; margin:-22px 0 0 -22px; display:grid; place-items:center; border:1px solid transparent; border-radius:50%; background:transparent; color:var(--galaxy-star-color); pointer-events:auto; cursor:pointer; transition:border-color .3s,box-shadow .3s; }
+.galaxy-star-marker span { width:5px; height:5px; border-radius:50%; background:#f0f7fc; opacity:clamp(.25,var(--star-power),1); box-shadow:0 0 calc(6px * var(--star-power)) 2px var(--galaxy-star-color),0 0 calc(25px * var(--star-power)) calc(8px * var(--star-power)) color-mix(in srgb,var(--galaxy-star-color) 30%,transparent),0 0 calc(60px * var(--star-power)) calc(15px * var(--star-power)) color-mix(in srgb,var(--galaxy-star-color) 9%,transparent); }
+.galaxy-star-marker i { position:absolute; width:calc(35px + 32px * var(--star-power)); height:1px; background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--galaxy-star-color) 65%,transparent),transparent); opacity:clamp(.1,var(--star-power),.85); }
+.galaxy-star-marker i::after { content:''; position:absolute; inset:0; transform:rotate(90deg) scaleX(.5); background:inherit; }
+.galaxy-label-selected .galaxy-star-marker { border-color:color-mix(in srgb,var(--galaxy-star-color) 35%,transparent); box-shadow:0 0 0 6px color-mix(in srgb,var(--galaxy-star-color) 4%,transparent); }
+.galaxy-label-selected .galaxy-star-marker::after { content:''; position:absolute; width:58px; height:58px; border-radius:50%; border:1px dashed color-mix(in srgb,var(--galaxy-star-color) 19%,transparent); animation:galaxy-orbit-turn 50s linear infinite; }
+.galaxy-label-body { position:absolute; top:22px; left:0; width:240px; transform:translateX(-50%); padding:12px 10px; text-align:left; text-shadow:0 2px 8px #04070d,0 0 18px #04070d,0 0 32px #04070d; border-top:1px solid #a8bbc318; background:radial-gradient(ellipse at 50% 20%,#080d15c2,transparent 76%); }
+.galaxy-content-0 .galaxy-label-body { top:17px; left:24px; transform:none; width:234px; padding:4px 0; border:0; background:none; }
+.galaxy-label-eyebrow { display:flex; align-items:center; gap:10px; margin-bottom:8px; color:#8397a7; font-size:8px; line-height:1.3; letter-spacing:2px; }
+.galaxy-label-eyebrow i { width:25px; height:1px; background:#9dadba36; }
+.galaxy-label-title { position:relative; display:block; width:100%; padding:0; margin:0; border:0; background:transparent; color:#d5dfe5; text-align:left; font:inherit; font-size:15px; font-weight:400; line-height:1.8; letter-spacing:.35px; text-shadow:inherit; cursor:pointer; pointer-events:auto; transition:color .2s; }
+.galaxy-content-0 .galaxy-label-title { font-size:15px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.galaxy-content-1 .galaxy-label-title { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+.galaxy-label-title:hover,.galaxy-label-selected .galaxy-label-title { color:#f3f5ee; }
+.galaxy-label-meta { display:block; margin-top:10px; color:#8695a2; font-size:10px; line-height:1.6; letter-spacing:.7px; }
+.galaxy-label-enter { display:flex; align-items:center; gap:14px; pointer-events:auto; border:0; background:transparent; padding:10px 0 0; color:#cbbb94; font-size:10px; letter-spacing:1px; cursor:pointer; text-shadow:inherit; opacity:.72; transition:opacity .2s; }
+.galaxy-label-enter span { font-size:15px; line-height:10px; }
+.galaxy-label-enter:hover,.galaxy-label:hover .galaxy-label-enter,.galaxy-label-selected .galaxy-label-enter { opacity:1; color:#ecdbab; }
+.galaxy-label button:focus-visible,.galaxy-hub button:focus-visible { outline:1px solid #d9c696; outline-offset:5px; border-radius:2px; }
+.galaxy-orbit-lines { position:absolute; inset:14% 0 10%; width:100%; height:76%; overflow:visible; opacity:.55; }
+.galaxy-orbit-lines ellipse { fill:none; stroke:#aabec7; stroke-width:.45; stroke-dasharray:1 8; opacity:.36; }
+.galaxy-orbit-lines .galaxy-orbit-faint { opacity:.1; stroke-dasharray:none; }
+.galaxy-orbit-lines path { fill:none; stroke:#abc3d4; stroke-width:.4; opacity:.18; stroke-dasharray:2 10; }
+.galaxy-hub { position:absolute; left:50%; top:49%; transform:translate(-50%,-50%); width:min(340px,27vw); text-align:center; pointer-events:auto; text-shadow:0 2px 12px #04070e,0 0 26px #04070e; }
+.galaxy-hub-star { position:relative; height:85px; width:85px; margin:0 auto 19px; display:grid; place-items:center; }
+.galaxy-hub-star::before { content:''; position:absolute; width:110px; height:110px; border:1px solid color-mix(in srgb,var(--galaxy-star-color) 17%,transparent); border-radius:50%; transform:rotateX(67deg) rotate(-24deg); }
+.galaxy-hub-star::after { content:''; position:absolute; width:75px; height:75px; border:1px dashed color-mix(in srgb,var(--galaxy-star-color) 23%,transparent); border-radius:50%; animation:galaxy-orbit-turn 48s linear infinite; }
+.galaxy-hub-star span { width:7px; height:7px; background:#f1faff; border-radius:50%; box-shadow:0 0 9px 5px #dbeefa,0 0 32px 14px color-mix(in srgb,var(--galaxy-star-color) 60%,transparent),0 0 80px 36px color-mix(in srgb,var(--galaxy-star-color) 18%,transparent); }
+.galaxy-hub-star i { position:absolute; width:130px; height:1px; background:linear-gradient(90deg,transparent,#e1f4ffb8,transparent); }
+.galaxy-hub-star i::after { content:''; position:absolute; inset:0; background:inherit; transform:rotate(90deg) scaleX(.5); }
+.galaxy-hub-kind { display:flex; justify-content:center; align-items:center; gap:12px; margin-bottom:13px; color:#9eb0bc; font-size:9px; letter-spacing:3.5px; }
+.galaxy-hub-kind i { width:3px; height:3px; border-radius:50%; background:#cbb993; box-shadow:0 0 8px #cbb993; }
+.galaxy-hub-title { display:block; margin:0; padding:0; width:100%; border:0; background:none; color:#edf0ed; font:inherit; font-size:25px; line-height:1.65; font-weight:400; letter-spacing:1px; text-align:center; }
+button.galaxy-hub-title { cursor:pointer; }
+button.galaxy-hub-title:hover { color:#fff2cd; }
+.galaxy-hub-meta { display:block; margin-top:16px; color:#9aa9b5; font-size:11px; letter-spacing:1px; line-height:1.6; }
+.galaxy-hub-read { padding:12px 0; margin-top:8px; background:none; border:0; color:#d4c097; font-size:11px; letter-spacing:1.2px; cursor:pointer; }
+.galaxy-hub-read span { margin-left:16px; }
+.galaxy-hub-article { top:47%; width:min(340px,27vw); }
+.galaxy-hub-article .galaxy-hub-title { font-size:23px; }
+.galaxy-hub-article .galaxy-hub-star { height:64px; margin-bottom:15px; }
+.galaxy-label-paragraph .galaxy-label-body { top:21px; width:min(285px,25vw); padding:15px 14px 12px; background:linear-gradient(155deg,#0b141deb,#0b111985); border:1px solid #93b4c721; border-bottom-color:#93b4c708; border-radius:2px; box-shadow:0 5px 35px #0002; backdrop-filter:blur(7px); }
+.galaxy-label-paragraph .galaxy-label-body::before { content:''; position:absolute; width:20px; height:1px; background:var(--galaxy-star-color); opacity:.5; top:-1px; left:-1px; }
+.galaxy-label-paragraph .galaxy-label-title { font-size:13px; line-height:1.85; letter-spacing:.25px; color:#c9d6df; }
+.galaxy-label-paragraph.galaxy-label-selected .galaxy-label-body { border-color:color-mix(in srgb,var(--galaxy-star-color) 45%,transparent); background:linear-gradient(155deg,#182631eb,#0b1119b8); }
+.galaxy-label-paragraph.galaxy-label-selected .galaxy-label-title { color:#f0f3ef; }
+.galaxy-label-paragraph .galaxy-label-meta { font-size:9px; margin-top:11px; }
+.galaxy-orbit-pagination { display:flex; align-items:center; justify-content:center; gap:14px; color:#9aaaba; font-size:10px; margin-top:12px; }
+.galaxy-orbit-pagination button { color:#b8c9d3; background:transparent; border:1px solid #8197aa33; border-radius:50%; width:25px; height:25px; cursor:pointer; }
+.galaxy-orbit-pagination button:disabled { opacity:.25; cursor:default; }
+.stellar-text { display:block; position:relative; overflow:visible; }
+.stellar-text-content { display:block; }
+.stellar-text-dust { position:absolute; left:-74px; top:-74px; z-index:2; pointer-events:none; }
+.stellar-text-enter .stellar-text-content { animation:galaxy-glyph-assemble 1.04s both; }
+.stellar-text-exit .stellar-text-content { animation:galaxy-glyph-dissolve .68s both; }
+.galaxy-content-exit .galaxy-star-marker,.galaxy-content-exit .galaxy-label-eyebrow,.galaxy-content-exit .galaxy-label-meta,.galaxy-content-exit .galaxy-label-enter,.galaxy-content-exit .galaxy-hub-star,.galaxy-content-exit .galaxy-hub-kind,.galaxy-content-exit .galaxy-hub-meta,.galaxy-content-exit .galaxy-hub-read,.galaxy-content-exit .galaxy-orbit-lines { animation:galaxy-chrome-depart .55s both; }
+.galaxy-content-enter .galaxy-star-marker,.galaxy-content-enter .galaxy-hub-star,.galaxy-content-enter .galaxy-orbit-lines { animation:galaxy-chrome-arrive 1s both; }
+.galaxy-flight-hud { position:absolute; inset:0; z-index:3; pointer-events:none; }
+.galaxy-reticle { position:absolute; top:50%; left:50%; width:34px; height:34px; transform:translate(-50%,-50%); border:1px solid #c3d5d032; border-radius:50%; }
+.galaxy-flight-caption { position:absolute; bottom:90px; left:50%; transform:translateX(-50%); color:#aab9b3; font-size:9px; letter-spacing:1px; }
+.galaxy-fallback-notice { position:absolute; z-index:3; bottom:30px; left:50%; transform:translateX(-50%); color:#738696; font-size:10px; }
+.galaxy-is-fallback .galaxy-content-0 .galaxy-label { visibility:visible!important; }
+.galaxy-is-fallback .galaxy-content-0 .galaxy-label-body { left:0; transform:translateX(-50%); }
+@keyframes galaxy-glyph-assemble { 0%,25% { opacity:0; filter:blur(5px); } 65% { opacity:.55; filter:blur(1px); } 100% { opacity:1; filter:blur(0); } }
+@keyframes galaxy-glyph-dissolve { 0% { opacity:1; filter:blur(0); } 35% { opacity:.18; filter:blur(2px); } 100% { opacity:0; filter:blur(5px); } }
+@keyframes galaxy-chrome-depart { to { opacity:0; } }
+@keyframes galaxy-chrome-arrive { from { opacity:0; } }
+@keyframes galaxy-orbit-turn { to { transform:rotate(360deg); } }
+.galaxy-reduced-motion *, .galaxy-reduced-motion *::before,.galaxy-reduced-motion *::after { animation:none!important; transition:none!important; }
+@media (max-width:1100px) and (min-width:761px) {
+  .galaxy-label-body { width:210px; }
+  .galaxy-hub-title { font-size:21px; }
+  .galaxy-hub-article .galaxy-hub-title { font-size:19px; }
+  .galaxy-label-paragraph .galaxy-label-body { width:24vw; padding:12px; }
+  .galaxy-label-paragraph .galaxy-label-title { font-size:12px; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .galaxy-label-body { animation: none; }
-  .galaxy-label, .galaxy-label-enter { transition: none; }
+@media (max-height:760px) and (min-width:761px) {
+  .galaxy-label-paragraph .galaxy-label-title { display:-webkit-box; -webkit-line-clamp:6; -webkit-box-orient:vertical; overflow:hidden; }
+  .galaxy-label-paragraph .galaxy-label-body { padding:10px 12px; }
+  .galaxy-hub-star { height:65px; margin-bottom:12px; }
+}
+@media (max-width:760px) {
+  .galaxy-content-0 .galaxy-labels { inset:165px 18px 124px; display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:minmax(174px,1fr); gap:18px; overflow-y:auto; overflow-x:hidden; padding:18px 4px; pointer-events:auto; scrollbar-width:none; }
+  .galaxy-content-0 .galaxy-label { position:relative; top:auto!important; left:auto!important; width:100%; height:100%; visibility:visible!important; }
+  .galaxy-content-0 .galaxy-label:nth-child(even) { padding-top:40px; }
+  .galaxy-content-0 .galaxy-star-marker { left:22px; top:8px; }
+  .galaxy-content-0 .galaxy-label:nth-child(even) .galaxy-star-marker { top:48px; }
+  .galaxy-content-0 .galaxy-label-body { position:relative; top:31px!important; left:0!important; width:100%; padding:8px 0; }
+  .galaxy-content-0 .galaxy-label-title { font-size:13px; line-height:1.8; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+  .galaxy-content-0 .galaxy-label-meta { font-size:9px; }
+  .galaxy-content-0 .galaxy-label-eyebrow { font-size:7px; margin-bottom:6px; }
+  .galaxy-orbit-lines { inset:21% -22% 20%; width:144%; height:56%; opacity:.4; }
+  .galaxy-hub,.galaxy-hub-article { top:29%; width:min(300px,78vw); }
+  .galaxy-hub-title,.galaxy-hub-article .galaxy-hub-title { font-size:19px; line-height:1.65; }
+  .galaxy-hub-star,.galaxy-hub-article .galaxy-hub-star { height:40px; width:60px; margin-bottom:18px; }
+  .galaxy-hub-star::before { width:80px; height:80px; }
+  .galaxy-hub-star::after { width:56px; height:56px; }
+  .galaxy-hub-kind { font-size:8px; margin-bottom:10px; }
+  .galaxy-hub-meta { margin-top:10px; font-size:10px; }
+  .galaxy-hub-read { margin-top:3px; padding:8px; font-size:10px; }
+  .galaxy-content-1 .galaxy-labels,.galaxy-content-2 .galaxy-labels { inset:47% 0 133px; display:flex; align-items:flex-start; gap:28px; overflow-x:auto; overflow-y:auto; padding:28px calc((100vw - 280px)/2) 12px; pointer-events:auto; scroll-snap-type:x mandatory; scrollbar-width:thin; scrollbar-color:#a4b2be3c transparent; scroll-padding:calc((100vw - 280px)/2); }
+  .galaxy-content-1 .galaxy-label,.galaxy-content-2 .galaxy-label { position:relative; flex:0 0 280px; width:280px; height:auto; min-height:235px; left:auto!important; top:auto!important; scroll-snap-align:center; }
+  .galaxy-content-1 .galaxy-star-marker,.galaxy-content-2 .galaxy-star-marker { left:50%; top:0; }
+  .galaxy-content-1 .galaxy-label-body,.galaxy-content-2 .galaxy-label-body { position:relative; width:280px; top:24px; left:0; transform:none; padding:17px; }
+  .galaxy-content-1 .galaxy-label-title { font-size:16px; line-height:1.9; }
+  .galaxy-content-2 .galaxy-label-title { font-size:13px; line-height:1.9; display:-webkit-box; -webkit-line-clamp:7; -webkit-box-orient:vertical; overflow:hidden; }
+  .galaxy-label-paragraph .galaxy-label-body { width:280px; }
+  .galaxy-label-enter { font-size:10px; opacity:1; }
+  .galaxy-flight-caption { bottom:122px; font-size:8px; }
+  .galaxy-fallback-notice { display:none; }
+  .galaxy-is-fallback .galaxy-content-0 .galaxy-label-body { transform:none; }
+}
+@media (prefers-reduced-motion:reduce) { .galaxy-scene *, .galaxy-scene *::before,.galaxy-scene *::after { animation:none!important; transition:none!important; } }
+
+@media (max-height:850px) and (min-width:761px) {
+  .galaxy-content-2 .galaxy-labels:has(> .galaxy-label:nth-child(3)) .galaxy-label:nth-child(-n+2) { top:19%!important; }
+  .galaxy-content-2 .galaxy-labels:has(> .galaxy-label:nth-child(3)) .galaxy-label:nth-child(n+3) { top:53%!important; }
 }

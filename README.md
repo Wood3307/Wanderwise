@@ -1,17 +1,17 @@
 # Wanderwise · 漫知
 
-以知乎内容为来源的三维知识探索 Web 应用。依据工作区《设计理念.md》，参考 WikiGalaxy 的粒子星海、轨道与飞行交互，独立实现现代 Three.js 渲染与三层知识纵深。
+以知乎内容为来源的三维知识探索应用。页面把内容放在宇宙中，按照 **问题集合 → 问题与多个回答 → 文章与精选段落** 展开；原文在居中阅览窗口中阅读。
 
 ## 启动
 
-需要 Node.js 18.19+ 和 npm。
+Node.js 18.19+：
 
 ```bash
 npm install
 npm run dev
 ```
 
-打开 <http://localhost:5173>。此命令同时启动 Vite 前端和 3001 端口的内容服务，不需要另起后端。首次启动无需密钥，可浏览随项目保存的 **10 篇知乎官方公开知识正文节选**；后台会尝试刷新官方数据。
+前端：<http://localhost:5188>；内容服务：3001。开发命令同时启动两者。5188 已被占用时先关闭本项目的旧开发进程，不会静默打开其他项目所在的端口。
 
 生产运行：
 
@@ -20,71 +20,116 @@ npm run build
 npm start
 ```
 
-访问 <http://localhost:3001>，同一进程同时提供构建后的网页与 API。生产进程需要安装运行依赖及 `tsx`（本项目的服务端直接运行 TypeScript）。
+访问 <http://localhost:3001>。生产进程同时托管前端构建和 API，需要运行 TypeScript 的 `tsx` 依赖。
 
-## 知乎内容接入
+## 知乎接入
 
-复制 `.env.example` 为 `.env`，在本机编辑：
+初次使用可将 `.env.example` 复制为 `.env`，在服务端配置：
 
 ```dotenv
-ZHIHU_ACCESS_SECRET=你的知乎开放平台凭证
+ZHIHU_ACCESS_SECRET=你的实际凭证
+ZHIHU_MODEL_ENABLED=false
 PORT=3001
 ```
 
-凭证来自 <https://developer.zhihu.com/profile>。重启服务后，输入问题即可调用工作区知乎文档所述的 `zhihu_search` 接口。密钥只在服务端读取，**不要加 `VITE_` 前缀，也不要提交 `.env`**。
+如果 `.env` 已存在，直接编辑对应配置，不要用模板覆盖已有凭证。
 
-- 有密钥且输入问题：调用知乎搜索，最多接收 10 个真实结果，按原始问题 ID 或标题归组；保留作者、赞同数和溯源链接。搜索没有提供完整原文，第三层明确显示“搜索摘要”。
-- 未配置密钥：在官方赛事公开知识语料内按关键词检索；空问题为自由漫游，不匹配时显示空结果，不生成虚构回答。
-- 官方赛事 API 将大部分正文截断到约 3000 字，公开内容明确标为“正文节选”。每篇作品是一个主题、一个作者的内容，不冒充同一个问题下的多位回答者。
-- 网络不可用：公开模式可继续使用 `server/data/zhihu-public.json` 中的真实快照；搜索认证失败和额度限制会明确报错，不伪装成搜索无结果。
-- 公开内容的来源链接指向官方内容接口；搜索内容链接指向对应知乎原文。内容版权归原作者及其权利人所有。
+Access Secret 申请步骤依据工作区官方 skill：
 
-当前集成依据 `REFERENCE/zhihu/references/http-api.md` 和 `hackathon-content-api.md`。赛事公开接口的长期可用性取决于知乎；客户端未抓取站点，也未安装或依赖知乎 CLI。
+1. 打开 <https://developer.zhihu.com/profile>。
+2. 用知乎账号登录并完成页面验证。
+3. 点击「申请新 Access Secret」，按页面提示获取凭证。
+4. 将凭证填入服务端 `.env` 的 `ZHIHU_ACCESS_SECRET`。
+5. 重启应用，打开右下角「内容与模型连接」查看配置状态，再输入一个问题进行检索。
 
-## 探索方式
+凭证只在服务端读取，`.env` 已忽略并应保留在本机。不要使用 `VITE_` 前缀或把凭证放入浏览器、URL、代码仓库。无需安装知乎 CLI 才能运行本 Web 应用；这里根据 skill 的开发接入文档使用官方 HTTP API。
 
-| 操作                    | 效果                                             |
-| ----------------------- | ------------------------------------------------ |
-| 向上滚轮 / 双指张开     | 逐步深入：问题星海 → 观点星系 → 文章恒星         |
-| 向下滚轮 / 双指收拢     | 回到上一层纵深                                   |
-| 鼠标拖动 / 单指滑动     | 转动三维视角                                     |
-| 点击星体或标题          | 选择问题或回答                                   |
-| 双击星体 / 点击进入按钮 | 飞向该层内容                                     |
-| F                       | 切换自由飞行                                     |
-| W / S、A / D、Shift     | 深入 / 返回、横向移动、加速                      |
-| E                       | 第二层收藏问题，第三层收藏文章；再次按下取消收藏 |
-| R                       | 对问题、文章或选中的段落写下思考                 |
-| Esc                     | 关闭弹窗或回到上一层                             |
-| /                       | 聚焦问题输入框                                   |
+### 真实问题与多回答
 
-文字输入时不会触发飞行、收藏或思考快捷键。底部分层按钮和星海图谱提供不依赖鼠标滚轮的导航。浏览器不支持 WebGL 或渲染上下文丢失时，切换到可操作的二维星图。
+输入问题时，应用调用官方 `zhihu_search`，把真实结果按知乎问题 ID 归组。进入某个问题后，再按该问题标题进行一次有缓存的检索，只补入归属匹配的回答，并保留作者、来源和赞同数。
 
-知识行囊、思考和足迹保存在当前浏览器的 `localStorage`。关闭或刷新页面后仍保留；换设备、清理站点数据和隐私模式不提供跨设备同步。可导出 Markdown 旅行手记，包含原作者、来源、引用段落、个人思考和探索时间线。
+同一问题 ID 优先；只有缺少问题 ID 的结果才允许按严格规范化标题归组。有其他明确问题 ID 的结果不会因标题相似被混入。接口返回多少真实回答就展示多少，不捏造作者或凑齐星星数量。知乎搜索每次最多返回 10 条结果，因此应用不声称列出了问题下的全部回答。
 
-## 接入已有占星台 / 小屋
+### 公开主题模式
 
-仓库尚未包含已有占星台及小屋源码，本实现只开发星空探索，并预留以下接口。具体类型见 `src/types.ts`，实现见 `src/lib/integration.ts`。
+未输入问题时，或没有配置搜索凭证时，应用提供 10 篇来自官方赛事接口的真实作品。它们按职场成长、学习注意力、人际心理等主题聚合，形成「主题 → 多篇原文 → 原文段落」。中央节点明确标注为**主题聚合**，不会冒充同一知乎问题的回答。
 
-最简单的跳转接入：
+公开语料支持关键词搜索，零匹配时保持空结果。首次启动使用带来源与获取时间的本地快照，后台有频率限制地刷新；联网失败保留真实快照，不生成替代内容。
+
+### 阅读边界
+
+搜索 API 返回的是摘要；官方赛事知识 API 的正文也可能被截断。原文阅览窗口会标明「搜索摘要」或「正文节选」，并保留知乎原文 / 官方内容来源链接。应用不会将这些文本冒称为完整回答，也不会尝试用模型补写缺失内容。
+
+## 小模型与段落筛选
+
+不配置模型时也可实际使用：本地算法根据查询词、信息密度、段落长度和差异筛选原文片段，并抑制重复、问候语等低信息内容。每条片段都带原文段落索引。
+
+可选两种模型接入方式：
+
+**知乎直答快速模型**：已有有效知乎凭证时，在 `.env` 中设置：
+
+```dotenv
+ZHIHU_MODEL_ENABLED=true
+```
+
+使用官方 `zhida-fast-1p5`，通过同一 Access Secret 鉴权。只有进入文章时才请求片段选择；结果缓存，重复请求合并，不自动重试模型 POST。
+
+**本地 / 兼容小模型**：在已运行的模型服务上选择实际安装的模型名称，例如 Ollama：
+
+```dotenv
+MODEL_BASE_URL=http://127.0.0.1:11434/v1
+MODEL_NAME=你的已安装模型名称
+MODEL_API_KEY=
+```
+
+外部服务需要 HTTPS，按服务要求配置 `MODEL_API_KEY`；本机兼容服务可使用 HTTP。配置完整的兼容模型优先于知乎直答。本项目不会自动下载体积较大的模型。
+
+模型只从提供的原文候选中选择片段；服务端校验候选编号与原文位置，最终文字来自原文。无效输出、超时或服务失败会明确提示并保留本地提取结果。模型标签如果存在，只是辅助组织，不是原作者写下的文字。模型配置与鉴权始终留在服务端。
+
+兼容协议参考 [Ollama 官方文档](https://docs.ollama.com/api/openai-compatibility)。知乎直答协议见工作区 `REFERENCE/zhihu/references/http-api.md`。
+
+## 操作
+
+| 操作                   | 效果                          |
+| ---------------------- | ----------------------------- |
+| 滚轮向上 / 双指张开    | 向当前目标深入                |
+| 滚轮向下 / 双指收拢    | 返回上一级尺度                |
+| 拖动 / 单指滑动        | 调整三维视角                  |
+| 点击星体               | 选择问题、回答或原文片段      |
+| 双击星体 / 进入按钮    | 进入选定内容                  |
+| 第三层点击中央文章标题 | 打开居中的原文阅览窗口        |
+| E                      | 收藏 / 取消收藏当前问题或文章 |
+| R                      | 对当前内容或选中段落写下思考  |
+| F / W A S D / Shift    | 切换飞行 / 移动 / 加速        |
+| Esc                    | 先关闭弹窗，再返回上一层      |
+| /                      | 聚焦问题输入                  |
+
+底部只保留返回、图谱、内容操作和视角工具。输入文字时不会误触探索快捷键。星尘文字特效支持「减少动态效果」；WebGL 不可用时仍可通过二维内容布局探索和阅读。
+
+收藏、思考与足迹保存在本机 `localStorage`；支持刷新恢复和 Markdown 导出，不提供跨设备同步。失效的历史结果会提示找不到原目标，不会偷偷跳到另一篇文章。
+
+## 占星台 / 小屋接入
+
+本仓库尚未提供已有占星台或小屋源码。星空入口支持 URL、自定义事件、同源消息和 JavaScript 调用，返回时携带收藏、思考与足迹。
+
+URL：
 
 ```ts
-const question = "大学生实习应该如何获取资源？";
 location.assign(
-  `/explore?q=${encodeURIComponent(question)}&returnUrl=${encodeURIComponent("/observatory")}`,
+  `/explore?q=${encodeURIComponent("大学生实习应该如何获取资源？")}&returnUrl=${encodeURIComponent("/observatory")}`,
 );
 ```
 
-本应用支持任意前端路由的 SPA 回退；生产部署也应将应用路由回退到 `index.html`，并将 `/api` 交给内容服务。支持 `q` 或 `topic` 参数；问题最长 160 字。
+`q` / `topic` 最长 160 字；生产服务对应用路由提供 SPA 回退。
 
-已嵌入同一个页面时，在 `wanderwise:ready` 之后调用：
+等待 `wanderwise:ready` 后：
 
 ```ts
 window.Wanderwise?.enter({
-  query: "大学生实习应该如何获取资源？",
+  query: "如何提高专注力？",
   returnUrl: "/observatory",
 });
 
-// 或使用自定义事件
 window.dispatchEvent(
   new CustomEvent("wanderwise:enter", {
     detail: { query: "如何提高专注力？", returnUrl: "/observatory" },
@@ -92,7 +137,7 @@ window.dispatchEvent(
 );
 ```
 
-同源 iframe 支持：
+同源 iframe：
 
 ```ts
 iframe.contentWindow?.postMessage(
@@ -104,40 +149,29 @@ iframe.contentWindow?.postMessage(
 );
 ```
 
-返回时监听：
+在应用所在窗口监听返回：
 
 ```ts
 window.addEventListener("wanderwise:return", (event) => {
   const { query, summary, returnedAt } = (event as CustomEvent).detail;
-  // summary 包含 collection、reflections、journey，可交给小屋整理。
+  // summary: collection、reflections、journey，交给已有小屋视图。
   event.preventDefault();
-  // 在这里切换到已有的占星台 / 小屋视图。
 });
 ```
 
-只有同源消息可改变探索入口；返回地址仅接受同源相对路径。宿主可用 `preventDefault()` 接管返回；否则跳转到有效 `returnUrl`。没有宿主和返回地址时，应用显示本次收获与导出入口。
+宿主可通过 `preventDefault()` 接管返回，否则应用跳转到验证后的同源相对 `returnUrl`。未提供返回入口时，展示本次收获和手记导出。
 
-## API 与项目结构
+## API
 
-| 路径                         | 返回                                         |
-| ---------------------------- | -------------------------------------------- |
-| `GET /api/health`            | 服务状态、是否配置搜索凭证、公开语料数量     |
-| `GET /api/explore?q=...`     | 查询、关键词、问题与回答、来源模式和来源说明 |
-| `GET /api/knowledge/:workId` | 已知官方公开作品的作者与正文节选             |
+| 路径                                                         | 作用                                               |
+| ------------------------------------------------------------ | -------------------------------------------------- |
+| `GET /api/health`                                            | 知乎配置状态、公开内容数、模型配置状态；不返回凭证 |
+| `GET /api/explore?q=...`                                     | 初始问题集合或公开主题集合                         |
+| `GET /api/questions/:questionId?q=...`                       | 按初始查询找到已知问题，按需展开真实回答           |
+| `GET /api/answers/:answerId/highlights?q=...&questionId=...` | 为已知问题中的已知回答筛选原文片段                 |
+| `GET /api/knowledge/:workId`                                 | 读取官方公开内容的作者与正文节选                   |
 
-```text
-src/App.tsx                    探索界面、阅读、行囊、思考与足迹
-src/components/GalaxyScene.tsx 三维粒子、投影标签、镜头与手势
-src/lib/storage.ts             持久化、校验及 Markdown 导出
-src/lib/integration.ts         占星台入口及返回协议
-server/zhihu.ts                内容适配、关键词、缓存与上游请求
-server/app.ts                  API、错误边界和生产静态资源托管
-server/data/zhihu-public.json  附来源及获取时间的真实公开内容快照
-tests/                        浏览器端到端测试
-REFERENCE/                    原始参考资料，保留原状
-```
-
-语义相关度使用中文分词后的标题 / 正文词项匹配与结果排序计算，亮度随分数变化；没有查询的自由漫游按公开列表顺序赋予初始亮度。这是可解释的关键词相关性，当前未接入向量模型。页面支持移动端、减少动态效果及本地中文字体。
+缓存和并发上限控制外部请求；搜索限流、鉴权失败及空内容会如实返回。模型端点由服务端配置，不接受浏览器传入任意地址。
 
 ## 验证
 
@@ -148,14 +182,16 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-浏览器测试可使用已有 Chromium：
+可用 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定本机 Chromium，`PLAYWRIGHT_BASE_URL` 指向已启动的应用。测试覆盖真实身份归组、多回答补充与缓存、来源片段校验、模型异常、本地持久化、接入协议和浏览器探索流程。自动化搜索场景使用明确的测试数据，避免测试反复消耗生产凭证额度。
 
-```bash
-PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/你的/chromium/路径 npm run test:e2e
-```
+核心文件：
 
-可选 `PLAYWRIGHT_BASE_URL` 指向已启动的服务。基础测试覆盖来源归组、上游错误、密钥隔离、输入校验、收藏恢复、导出和宿主接入；浏览器测试覆盖三层导航、收藏、段落思考、刷新恢复、查询、异常及移动端操作。
+- `src/components/GalaxyScene.tsx`：三维星空、三层内容布局和交互。
+- `src/components/StellarText.tsx`：文字星尘聚合 / 消散。
+- `src/components/ReadingRoom.tsx`：居中原文阅读。
+- `src/App.tsx`：检索、异步内容展开、行囊、思考和连接状态。
+- `server/zhihu.ts`：知乎搜索、严格归组与公开主题语料。
+- `server/highlights.ts`：原文筛选与可选模型接入。
+- `src/lib/`：持久化、Markdown 导出与占星台协议。
 
-本次没有知乎搜索凭证，因此任意问题搜索通过协议测试验证，真实联网验收使用的是无需凭证的官方公开内容接口。没有部署到外部平台。
-
-参考项目、字体与依赖的署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+参考项目、字体、内容来源与许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
