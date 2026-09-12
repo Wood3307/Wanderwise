@@ -16,7 +16,11 @@ Wanderwise 的 `src/components/GalaxyScene.tsx` 是独立编写的现代 Three.j
 
 内容版权归原作者及相应权利人所有。作者随每篇作品呈现；正文或摘要不会标注为 Wanderwise 或用户创作。知乎赛事接口的内容和可用性受赛事及平台规则约束。
 
-## 字体
+## 宇宙背景
+
+`public/textures/cosmic-observatory-v3.webp` 使用内置 `image_gen.imagegen` 生成。用户提供的三张宇宙图片作为题材、色彩和氛围参考，未直接复制到应用中。完整提示词、生成方式及格式压缩记录见 [COSMIC_ART_DIRECTION.md](docs/COSMIC_ART_DIRECTION.md)。
+
+## 字体资源
 
 - Noto Sans SC：Google / Adobe，SIL Open Font License 1.1。许可证随文件位于 `public/fonts/OFL-NotoSansSC.txt`。
 - DM Sans：项目字体作者，SIL Open Font License 1.1。许可证位于 `public/fonts/OFL-DMSans.txt`。

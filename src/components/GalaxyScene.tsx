@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import type { Answer, Highlight, Question } from '../types';
 import './galaxy.css';
 import StellarText from './StellarText';
+import CosmicBackdrop from './CosmicBackdrop';
 
 interface GalaxySceneProps {
   questions: Question[];
@@ -594,9 +595,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
 
   return (
     <div ref={containerRef} className={`galaxy-scene ${dragging ? 'galaxy-is-dragging' : ''} ${!webglAvailable ? 'galaxy-is-fallback' : ''} ${props.reducedMotion ? 'galaxy-reduced-motion' : ''}`} data-depth={stage} aria-label="知识宇宙探索">
-      <div className="galaxy-nebula galaxy-nebula-one" aria-hidden="true" />
-      <div className="galaxy-nebula galaxy-nebula-two" aria-hidden="true" />
-      <div className="galaxy-nebula galaxy-nebula-three" aria-hidden="true" />
+      <CosmicBackdrop depth={props.depth} reducedMotion={props.reducedMotion} />
       <canvas ref={canvasRef} className="galaxy-canvas" tabIndex={0} aria-label="三维知识星空。滚轮向上深入，向下返回，拖动调整视角；选择星光可进入下一层。" />
       <div className="galaxy-vignette" aria-hidden="true" />
       {!webglAvailable && <span className="galaxy-fallback-notice">二维星图</span>}
