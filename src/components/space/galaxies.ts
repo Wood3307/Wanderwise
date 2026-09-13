@@ -238,6 +238,47 @@ export function createGalaxy(spec: GalaxySpec, options: GalaxyOptions) {
     addParticle(starData, position, color, size);
   }
 
+  // A separate, bounded population fills the gaps between resolved stars in the
+  // overview. Stratified sampling makes every section of an arm legible without
+  // enlarging the existing points or changing the close-up stellar population.
+  const detailData = particles();
+  const detailRandom = randomFrom(`${options.seed}:fine-starlight`);
+  const detailCount = options.mobile ? 1100 : 2600;
+  for (let i = 0; i < detailCount; i++) {
+    let position: THREE.Vector3;
+    let color: THREE.Color;
+    if (spec.kind === 'spiral' || spec.kind === 'barred-spiral') {
+      const arm = i % spec.arms;
+      const sample = Math.floor(i / spec.arms);
+      const samples = Math.ceil((detailCount - arm) / spec.arms);
+      const start = spec.kind === 'barred-spiral' ? 0.29 : 0.18;
+      const t = start + (sample + detailRandom()) / samples * (0.98 - start);
+      const scatter = normal(detailRandom) * (0.026 + t * 0.046);
+      position = armPoint(spec, spec.radius * t, arm, scatter);
+      position.z = normal(detailRandom) * (0.28 + (1 - t) * 0.48);
+      color = blue.clone().lerp(ice, 0.22 + detailRandom() * 0.52);
+      if (detailRandom() < 0.075) color.lerp(pink, 0.55);
+    } else if (spec.kind === 'elliptical') {
+      const radius = spec.radius * Math.pow((i + detailRandom()) / detailCount, 1.2) * 0.94;
+      const angle = i * 2.399963;
+      const z = detailRandom() * 2 - 1;
+      const xy = Math.sqrt(1 - z * z);
+      position = new THREE.Vector3(Math.cos(angle) * radius * xy, Math.sin(angle) * radius * xy * spec.flattening, z * radius * 0.57);
+      color = oldStars.clone().lerp(cream, detailRandom() * 0.6);
+    } else if (spec.kind === 'lenticular') {
+      const radius = spec.radius * Math.sqrt((i + detailRandom()) / detailCount);
+      const angle = i * 2.399963;
+      position = new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius, normal(detailRandom) * 0.45);
+      color = oldStars.clone().lerp(ice, detailRandom() * 0.4);
+    } else {
+      const clump = i % 6;
+      const spread = 3.4 + (clump % 3) * 1.7;
+      position = irregularClump(spec, clump).add(new THREE.Vector3(normal(detailRandom) * spread, normal(detailRandom) * spread * 0.8, normal(detailRandom) * 2.2));
+      color = blue.clone().lerp(clump % 3 === 0 ? pink : ice, 0.3 + detailRandom() * 0.4);
+    }
+    addParticle(detailData, position, color.multiplyScalar(0.28 + detailRandom() * 0.35), 0.2 + detailRandom() * 0.22);
+  }
+
   // Soft interstellar light traces the same volume as the stellar population.
   // Separate dark lanes interrupt the arms; they are geometry, not a flat decal.
   if (spec.kind === 'spiral' || spec.kind === 'barred-spiral') {
@@ -299,19 +340,28 @@ export function createGalaxy(spec: GalaxySpec, options: GalaxyOptions) {
     }
   }
 
-  const materialEntries: { material: THREE.ShaderMaterial | THREE.SpriteMaterial; opacity: number }[] = [];
+  const materialEntries: { material: THREE.ShaderMaterial | THREE.SpriteMaterial; opacity: number; overviewGain?: number; detailOnly?: boolean }[] = [];
   const extraGeometries: THREE.BufferGeometry[] = [];
   const hazeMaterial = particleMaterial(options.pixelRatio, true);
   const starsMaterial = particleMaterial(options.pixelRatio, false);
   const dustMaterial = particleMaterial(options.pixelRatio, true, true);
+  const detailMaterial = particleMaterial(options.pixelRatio, false);
   const haze = particleCloud(hazeData, hazeMaterial);
   const stars = particleCloud(starData, starsMaterial);
   const dust = particleCloud(dustData, dustMaterial);
+  const detailStars = particleCloud(detailData, detailMaterial);
+  detailStars.name = 'galaxy-detail-stars';
   haze.renderOrder = 0;
   stars.renderOrder = 2;
   dust.renderOrder = 3;
-  group.add(haze, stars, dust);
-  materialEntries.push({ material: hazeMaterial, opacity: brightness * 0.23 }, { material: starsMaterial, opacity: brightness * 0.86 }, { material: dustMaterial, opacity: 0.085 });
+  detailStars.renderOrder = 2;
+  group.add(haze, stars, dust, detailStars);
+  materialEntries.push(
+    { material: hazeMaterial, opacity: brightness * 0.23, overviewGain: 0.18 },
+    { material: starsMaterial, opacity: brightness * 0.86, overviewGain: 0.12 },
+    { material: dustMaterial, opacity: 0.085 },
+    { material: detailMaterial, opacity: brightness * 0.58, detailOnly: true },
+  );
 
   if (spec.kind === 'lenticular') {
     // Extinction lies IN the disk: it becomes a fine band from an edge-on view.
@@ -349,32 +399,46 @@ export function createGalaxy(spec: GalaxySpec, options: GalaxyOptions) {
       sprite.scale.set(size, size * (spec.kind === 'elliptical' ? spec.flattening : 1), 1);
       sprite.renderOrder = 1;
       group.add(sprite);
-      materialEntries.push({ material, opacity: opacity * brightness });
+      materialEntries.push({ material, opacity: opacity * brightness, overviewGain: 0.08 });
     }
   } else {
     const material = new THREE.SpriteMaterial({ map: texture, color: '#b5d6f4', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
     const sprite = new THREE.Sprite(material);
     sprite.scale.set(11, 11, 1);
     group.add(sprite);
-    materialEntries.push({ material, opacity: brightness * 0.25 });
+    materialEntries.push({ material, opacity: brightness * 0.25, overviewGain: 0.08 });
   }
 
   let disposed = false;
-  const setOpacity = (opacity: number) => {
-    const visibleOpacity = THREE.MathUtils.clamp(opacity, 0, 1);
+  let visibleOpacity = 1;
+  let overviewDetail = 1;
+  const applyOpacity = () => {
     group.visible = visibleOpacity > 0.001;
+    detailStars.visible = overviewDetail * visibleOpacity > 0.001;
     for (const entry of materialEntries) {
-      if (entry.material instanceof THREE.ShaderMaterial) entry.material.uniforms.uOpacity.value = entry.opacity * visibleOpacity;
-      else entry.material.opacity = entry.opacity * visibleOpacity;
+      const detailFactor = entry.detailOnly ? overviewDetail : 1 + (entry.overviewGain ?? 0) * overviewDetail;
+      const opacity = entry.opacity * visibleOpacity * detailFactor;
+      if (entry.material instanceof THREE.ShaderMaterial) entry.material.uniforms.uOpacity.value = opacity;
+      else entry.material.opacity = opacity;
     }
+  };
+  const setOpacity = (opacity: number) => {
+    visibleOpacity = THREE.MathUtils.clamp(opacity, 0, 1);
+    applyOpacity();
   };
   setOpacity(1);
   group.userData.morphology = spec.kind;
-  group.userData.particleCount = starData.sizes.length + hazeData.sizes.length + dustData.sizes.length;
+  group.userData.particleCount = starData.sizes.length + hazeData.sizes.length + dustData.sizes.length + detailData.sizes.length;
 
   return {
     group,
     setOpacity,
+    setDetailVisibility(amount: number) {
+      const next = THREE.MathUtils.clamp(amount, 0, 1);
+      if (next === overviewDetail) return;
+      overviewDetail = next;
+      applyOpacity();
+    },
     update(time: number, reducedMotion: boolean) {
       for (const { material } of materialEntries) {
         if (material instanceof THREE.ShaderMaterial) material.uniforms.uTime.value = reducedMotion ? 0 : time;
@@ -383,7 +447,7 @@ export function createGalaxy(spec: GalaxySpec, options: GalaxyOptions) {
     dispose() {
       if (disposed) return;
       disposed = true;
-      for (const object of [stars, haze, dust]) object.geometry.dispose();
+      for (const object of [stars, haze, dust, detailStars]) object.geometry.dispose();
       for (const geometry of extraGeometries) geometry.dispose();
       for (const { material } of materialEntries) material.dispose();
       texture.dispose();

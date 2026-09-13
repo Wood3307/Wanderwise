@@ -953,6 +953,32 @@ button.galaxy-hub-title:hover {
 .galaxy-spatial .galaxy-content-exit .galaxy-core-hit {
   animation: galaxy-chrome-depart 0.55s both;
 }
+/* The reading scrim belongs to the glyphs, not the longer-lived dust canvas.
+   Release it before the letters finish dissolving to avoid a stranded shadow. */
+.galaxy-content-exit .galaxy-label-body::before,
+.galaxy-content-exit .galaxy-label-body::after,
+.galaxy-content-exit .galaxy-hub::before {
+  --depart-scrim-opacity: var(--depart-before-opacity, 0);
+  animation: galaxy-scrim-depart 0.22s ease-out both;
+  transition: none;
+}
+.galaxy-content-exit .galaxy-label-body::after {
+  --depart-scrim-opacity: var(--depart-after-opacity, 0);
+}
+.galaxy-content-exit .galaxy-orbit-pagination {
+  animation: galaxy-chrome-depart 0.22s ease-out both;
+}
+.galaxy-content-enter .galaxy-label-body::before,
+.galaxy-content-enter .galaxy-hub::before {
+  animation: galaxy-contrast-arrive 1.04s both;
+}
+@keyframes galaxy-contrast-arrive {
+  0%, 25% { opacity: 0; }
+}
+@keyframes galaxy-scrim-depart {
+  from { opacity: var(--depart-scrim-opacity); }
+  to { opacity: 0; }
+}
 @media (max-width: 1100px) and (min-width: 761px) {
   .galaxy-spatial .galaxy-label-body,
   .galaxy-spatial .galaxy-content-0 .galaxy-label-body,

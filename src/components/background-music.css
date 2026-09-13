@@ -1,0 +1,87 @@
+.background-music {
+  position: relative;
+  display: flex;
+  align-items: center;
+  color: #9fb4b7;
+  pointer-events: auto;
+}
+.background-music audio { display: none; }
+.music-toggle,
+.music-settings-toggle,
+.music-mute {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 30px;
+  padding: 0;
+  color: inherit;
+}
+.music-toggle { width: 25px; }
+.music-settings-toggle { width: 15px; color: #79979f; }
+.music-mute { width: 24px; flex-shrink: 0; }
+.music-toggle:hover,
+.music-settings-toggle:hover,
+.music-mute:hover,
+.background-music.is-playing { color: #d6efea; }
+.music-toggle:focus-visible,
+.music-settings-toggle:focus-visible,
+.music-mute:focus-visible {
+  outline: 1px solid #a6dce8;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+.music-glimmer {
+  position: absolute;
+  bottom: 0;
+  left: 8px;
+  width: 9px;
+  height: 1px;
+  opacity: 0;
+  background: #c5f5ef;
+  box-shadow: 0 0 9px 1px #99e0e96e;
+  transition: opacity 240ms ease;
+}
+.is-playing .music-glimmer { opacity: 0.85; }
+.music-projection {
+  position: absolute;
+  top: 43px;
+  right: -3px;
+  z-index: 8;
+  width: 218px;
+  padding: 15px 17px 12px;
+  background: linear-gradient(145deg, #102534ed, #06131af2);
+  backdrop-filter: blur(18px);
+  border-top: 1px solid #a6dce868;
+  box-shadow: 0 12px 35px #0005, 0 -7px 20px -15px #bcefff;
+}
+.music-projection::before {
+  content: "";
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #e0fbff, transparent);
+  box-shadow: 0 0 10px #a6dce896;
+  pointer-events: none;
+}
+.music-track { display: flex; flex-direction: column; gap: 6px; padding-left: 4px; }
+.music-track > span { color: #daeff1; font-size: 11px; letter-spacing: 2.2px; }
+.music-track > small { color: #93adb6; font-size: 10px; letter-spacing: 0.6px; }
+.music-volume-row { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+.music-volume-row input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 20px;
+  accent-color: #b9e1e4;
+  cursor: pointer;
+}
+.music-volume-row output { width: 29px; text-align: right; color: #9ab8c1; font-size: 10px; }
+.music-error { margin: 9px 0 0; font-size: 11px; color: #ead1bc; line-height: 1.7; }
+@media (max-width: 760px) {
+  .music-projection { top: 39px; right: -25px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .music-glimmer { transition: none; }
+}

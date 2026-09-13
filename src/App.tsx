@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import GalaxyScene from "./components/GalaxyScene";
 import ReadingRoom from "./components/ReadingRoom";
+import BackgroundMusic from "./components/BackgroundMusic";
 import type {
   Answer,
   ExploreResponse,
@@ -956,6 +957,7 @@ export default function App() {
               <Footprints size={18} />
               <span>足迹</span>
             </button>
+            <BackgroundMusic />
             <button
               className="nav-link home-link"
               aria-label="返回占星台"

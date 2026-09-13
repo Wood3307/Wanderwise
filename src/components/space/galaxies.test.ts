@@ -15,10 +15,66 @@ test('galaxy seeds are repeatable and a five-question sky contains five physical
     const firstStars = first.group.children[1] as THREE.Points;
     const secondStars = second.group.children[1] as THREE.Points;
     assert.deepEqual(firstStars.geometry.getAttribute('position').array, secondStars.geometry.getAttribute('position').array);
-    assert.ok(first.group.userData.particleCount < 7000, 'ten desktop galaxies remain below 70,000 particles');
+    assert.ok(first.group.userData.particleCount < 9200, 'ten desktop galaxies remain below 92,000 particles');
     first.dispose();
     second.dispose();
   }
+});
+
+test('fine stellar populations have bounded mobile geometry and cover every spiral arm', () => {
+  for (const mobile of [false, true]) {
+    for (let morphology = 0; morphology < 5; morphology++) {
+      const spec = getGalaxySpec('fine-grains', morphology);
+      const galaxy = createGalaxy(spec, { ...options, mobile });
+      assert.ok(galaxy.group.userData.particleCount < (mobile ? 4600 : 9200));
+      const detail = galaxy.group.getObjectByName('galaxy-detail-stars') as THREE.Points;
+      assert.ok(detail instanceof THREE.Points);
+      for (const attribute of Object.values(detail.geometry.attributes)) {
+        assert.ok(Array.from(attribute.array).every(Number.isFinite));
+      }
+      if (spec.kind === 'spiral' || spec.kind === 'barred-spiral') {
+        const bins = Array.from({ length: spec.arms }, () => new Array<number>(12).fill(0));
+        const positions = detail.geometry.getAttribute('position');
+        const start = spec.kind === 'barred-spiral' ? 0.29 : 0.18;
+        const barEnd = spec.kind === 'barred-spiral' ? 0.28 : 0.1;
+        for (let i = 0; i < positions.count; i++) {
+          const x = positions.getX(i), y = positions.getY(i);
+          const t = Math.hypot(x, y) / spec.radius;
+          const winding = spec.phase + Math.max(0, t - barEnd) * spec.winding;
+          const angle = ((Math.atan2(y, x) - winding) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+          const arm = Math.round(angle / (Math.PI * 2 / spec.arms)) % spec.arms;
+          const bin = Math.min(11, Math.floor((t - start) / (0.98 - start) * 12));
+          assert.ok(bin >= 0);
+          bins[arm][bin]++;
+        }
+        assert.ok(bins.flat().every(count => count >= (mobile ? 20 : 60)), 'fine particles fill each radial section of every arm');
+      }
+      galaxy.dispose();
+    }
+  }
+});
+
+test('overview detail fades away at close range and preserves relevance brightness ordering', () => {
+  const spec = getGalaxySpec('brightness', 0);
+  const dim = createGalaxy(spec, { ...options, relevance: 0.2 });
+  const bright = createGalaxy(spec, { ...options, relevance: 0.9 });
+  const stars = (galaxy: typeof dim) => galaxy.group.children[1] as THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
+  for (const galaxy of [dim, bright]) {
+    const detail = galaxy.group.getObjectByName('galaxy-detail-stars') as THREE.Points<THREE.BufferGeometry, THREE.ShaderMaterial>;
+    const overviewOpacity = stars(galaxy).material.uniforms.uOpacity.value;
+    galaxy.setDetailVisibility(0);
+    assert.equal(detail.visible, false);
+    assert.equal(detail.material.uniforms.uOpacity.value, 0);
+    assert.ok(Math.abs(stars(galaxy).material.uniforms.uOpacity.value * 1.12 - overviewOpacity) < 1e-12);
+    galaxy.setDetailVisibility(0.5);
+    assert.equal(detail.visible, true);
+    const detailOpacity = detail.material.uniforms.uOpacity.value;
+    galaxy.setOpacity(0.5);
+    assert.equal(detail.material.uniforms.uOpacity.value, detailOpacity / 2);
+  }
+  assert.ok(stars(bright).material.uniforms.uOpacity.value > stars(dim).material.uniforms.uOpacity.value * 3);
+  dim.dispose();
+  bright.dispose();
 });
 
 test('answers occupy distinct finite physical locations, including the single-answer case', () => {

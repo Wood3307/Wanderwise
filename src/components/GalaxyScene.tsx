@@ -106,6 +106,8 @@ function seededRandom(seed: string) {
 function makeLayout(questions: Question[]): GalaxyNode[] {
   const positions = createClusterLayout(
     questions.map((question) => question.id),
+    // Expand the same balanced volume: no axis or camera direction is favoured.
+    { spacing: (questions.length === 3 ? 195 : 168) * 1.22 },
   );
   return questions.map((question, index) => {
     const spec = getGalaxySpec(question.id, index);
@@ -234,6 +236,16 @@ export default function GalaxyScene(props: GalaxySceneProps) {
   }, [count, pageSize]);
   useEffect(() => {
     setPage(0);
+    // Capture the current scrim opacity before changing phases. Rapid reverse
+    // zooms can interrupt assembly while its contrast backing is still clear.
+    containerRef.current
+      ?.querySelectorAll<HTMLElement>(
+        ".galaxy-content-enter .galaxy-label-body, .galaxy-content-enter .galaxy-hub",
+      )
+      .forEach((element) => {
+        element.style.setProperty("--depart-before-opacity", getComputedStyle(element, "::before").opacity);
+        element.style.setProperty("--depart-after-opacity", getComputedStyle(element, "::after").opacity);
+      });
     setLayers((previous) =>
       previous.some(
         (layer) => layer.key === layerKey && layer.phase === "enter",
@@ -297,6 +309,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       systemKey = "";
     let comets: ReturnType<typeof createCometField> | null = null;
     let cometKey = "";
+    let cometWasActive = false;
     let previousPaused: boolean | undefined;
     const spinAxis = new THREE.Vector3(0, 0, 1);
     const spinRotation = new THREE.Quaternion();
@@ -398,31 +411,6 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         answerStars.set(answer.id, star);
       });
     });
-    const network = new THREE.Group();
-    const networkMaterial = new THREE.LineBasicMaterial({
-      color: "#8ba8b9",
-      transparent: true,
-      opacity: 0.12,
-      depthWrite: false,
-    });
-    layout.slice(1).forEach((node, index) => {
-      const start = layout[Math.floor(index / 2)].position;
-      const curve = new THREE.QuadraticBezierCurve3(
-        start,
-        start
-          .clone()
-          .lerp(node.position, 0.5)
-          .add(new THREE.Vector3(0, 18, -20)),
-        node.position,
-      );
-      network.add(
-        new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(curve.getPoints(35)),
-          networkMaterial,
-        ),
-      );
-    });
-    scene.add(network);
     const trailGeometry = new THREE.BufferGeometry();
     const trailPoints: number[] = [];
     for (let i = 0; i < 20; i++) {
@@ -769,7 +757,8 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       const halfField = Math.atan(
         Math.tan(THREE.MathUtils.degToRad(24)) * Math.min(1, camera.aspect),
       );
-      const farRadius = Math.max(320, (extent / Math.sin(halfField)) * 1.05);
+      // Keep complete galaxy disks in view, with less unused perimeter padding.
+      const farRadius = Math.max(320, extent / Math.sin(halfField));
       const galaxyRadius = 150 * Math.max(1, 0.95 / camera.aspect);
       const stellarRadius = 38 * Math.max(1, 0.96 / camera.aspect);
       modelRadius = THREE.MathUtils.lerp(
@@ -836,21 +825,29 @@ export default function GalaxyScene(props: GalaxySceneProps) {
             seed,
             scale: level === 2 ? 17 : q.spec.radius * 1.1,
             mobile,
+            mode: level === 2 ? "system" : "galaxy",
           });
           scene.add(comets.group);
           cometKey = nextCometKey;
+        } else if (!cometWasActive) {
+          comets!.restart();
         }
+        cometWasActive = true;
         comets!.group.position.copy(level === 2 && a ? a.position : q.position);
-        if (level === 2 && system)
-          comets!.group.quaternion.copy(system.group.quaternion);
-        else
-          comets!.group.quaternion.copy(
-            galaxyModels.get(q.question.id)!.group.quaternion,
-          );
-        comets!.group.quaternion.multiply(cometTilt);
+        if (level === 2) {
+          // A peripheral flyby remains visible and clears the title from every
+          // camera angle. Semantic stars/planets retain their own world orbits.
+          comets!.group.quaternion.copy(camera.quaternion);
+        } else {
+          comets!.group.quaternion
+            .copy(galaxyModels.get(q.question.id)!.group.quaternion)
+            .multiply(cometTilt);
+        }
+        comets!.setOpacity(latest.reducedMotion ? 0 : level === 2
+          ? 0.85 * smooth((depth - 1.65) / 0.35) : 0.5);
         comets!.update(elapsed, latest.reducedMotion, paused);
-        comets!.setOpacity(latest.reducedMotion ? 0 : level === 2 ? 0.48 : 0.5);
       } else if (comets) {
+        cometWasActive = false;
         comets.update(elapsed, latest.reducedMotion, true);
         comets.setOpacity(0);
       }
@@ -859,6 +856,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         const opacity = chosen
           ? (1 - inward * 0.12) * (1 - intimate * 0.982)
           : 1 - inward * 0.96;
+        galaxyModels.get(node.question.id)?.setDetailVisibility(1 - inward);
         galaxyModels.get(node.question.id)?.setOpacity(opacity);
         galaxyModels
           .get(node.question.id)
@@ -879,12 +877,14 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       container.dataset.motionPaused = String(paused);
       if (level > 0)
         container.dataset.starKind = a ? getStarStyle(a.answer.id).kind : "";
-      if (projectionTick % 15 === 0 || previousPaused !== paused)
+      if (projectionTick % 15 === 0 || previousPaused !== paused) {
         container.dataset.galaxyRotation = (
           rotationMemory.current.get(q.question.id) ?? 0
         ).toFixed(6);
+        container.dataset.cometActive = String(level === 2 && !!comets?.group.userData.cometActive);
+        container.dataset.cometPalette = level === 2 ? comets?.group.userData.cometPalette ?? "" : "";
+      }
       previousPaused = paused;
-      networkMaterial.opacity = 0.11 * (1 - inward);
       trails.material.opacity =
         latest.flightMode && !latest.reducedMotion ? movement * 0.08 : 0;
       writeProjection(level, dt);

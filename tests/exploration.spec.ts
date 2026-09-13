@@ -581,6 +581,47 @@ test('normal motion retains outgoing glyph dust until disintegration finishes', 
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '1');
 });
 
+test('wheel transitions release old reading scrims while the outgoing stardust is retained', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await arrive(page);
+  await enterArticle(page);
+  // Let the readable article settle, including its stronger paragraph scrims.
+  await expect.poll(() => active(page).locator('.galaxy-hub').evaluate(node =>
+    Number(getComputedStyle(node, '::before').opacity),
+  )).toBeGreaterThan(0.75);
+  await page.evaluate(() => {
+    Reflect.set(window, '__departingScrims', null);
+    const observer = new MutationObserver(() => {
+      const layer = document.querySelector('.galaxy-content-2.galaxy-content-exit');
+      if (!layer) return;
+      observer.disconnect();
+      // Inspect the actual rendered CSS timeline deterministically; software
+      // WebGL can delay its first frame beyond a wall-clock sampling timer.
+      for (const animation of layer.getAnimations({ subtree: true })) animation.currentTime = 320;
+      Reflect.set(window, '__departingScrims', {
+        retained: layer.isConnected,
+        inert: (layer as HTMLElement).inert,
+        dust: layer.querySelectorAll('.stellar-text-exit .stellar-text-dust').length,
+        opacity: [...layer.querySelectorAll('.galaxy-label-body, .galaxy-hub')].map(node =>
+          Number(getComputedStyle(node, '::before').opacity)),
+      });
+    });
+    observer.observe(document.querySelector('.galaxy-scene')!, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  });
+  // Actual wheel navigation is the reported trigger; it must keep source access intact.
+  await page.mouse.move(100, 420);
+  await page.mouse.wheel(0, 700);
+  await expect.poll(() => page.evaluate(() => Reflect.get(window, '__departingScrims'))).not.toBeNull();
+  const sample = await page.evaluate(() => Reflect.get(window, '__departingScrims'));
+  expect(sample.retained).toBe(true);
+  expect(sample.inert).toBe(true);
+  expect(sample.dust).toBeGreaterThan(0);
+  expect(sample.opacity.length).toBeGreaterThan(1);
+  expect(Math.max(...sample.opacity)).toBeLessThan(0.02);
+  await expect(page.locator('.galaxy-content-exit')).toHaveCount(0);
+  await expect(active(page).locator('.galaxy-hub-title')).toHaveText(question.title);
+});
+
 test('mobile supports three layers, central reading and notes without horizontal overflow', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await arrive(page);
