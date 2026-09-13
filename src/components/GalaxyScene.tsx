@@ -3,6 +3,9 @@ import * as THREE from "three";
 import type { Answer, Highlight, Question } from "../types";
 import StellarText from "./StellarText";
 import CosmicBackdrop from "./CosmicBackdrop";
+import { BIRTH_MS, COLLAPSE_MS, type SearchVoyage } from "../lib/search-voyage";
+import { hasRichSyntax } from "../lib/rich-text";
+import { createSearchTransition, sampleBirth, sampleCollapse, type TransitionAnchor } from "./space/search-transition";
 import { createClusterLayout } from "./space/cluster-layout";
 import { createStar, getStarStyle } from "./space/stars";
 import { createCometField } from "./space/comets";
@@ -31,6 +34,8 @@ interface GalaxySceneProps {
   selectedQuestionId: string | null;
   selectedAnswerId: string | null;
   depth: number;
+  voyage?: SearchVoyage | null;
+  onVoyageReady?: (id: number) => void;
   onDepthChange: (depth: number) => void;
   onSelectQuestion: (id: string) => void;
   onSelectAnswer: (id: string) => void;
@@ -167,6 +172,10 @@ export default function GalaxyScene(props: GalaxySceneProps) {
   const propsRef = useRef(props);
   propsRef.current = props;
   const [webglAvailable, setWebglAvailable] = useState(true);
+  useEffect(() => {
+    if (!webglAvailable && props.voyage?.phase === "birth" && !props.voyage.ready)
+      props.onVoyageReady?.(props.voyage.id);
+  }, [webglAvailable, props.voyage, props.onVoyageReady]);
   const [dragging, setDragging] = useState(false);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(() => (innerWidth < 760 ? 2 : 4));
@@ -280,6 +289,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const canvas = canvasRef.current,
       container = containerRef.current;
     if (!canvas || !container || !layout.length) return;
+    if (propsRef.current.voyage?.phase === "birth") cameraMemory.current = null;
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -302,6 +312,19 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(48, width / height, 0.06, 4000);
+    const searchEffect = createSearchTransition({ mobile, pixelRatio });
+    scene.add(searchEffect.group);
+    const infallNormal = new THREE.Vector3();
+    const infallTarget = new THREE.Vector3();
+    const birthCenter = new THREE.Vector3();
+    let infallActive = false;
+    let holeScreen = { x: 0, y: 0 };
+    let capturedWidth = 0, capturedHeight = 0;
+    const infallPoses = new Map<THREE.Object3D, {
+      position: THREE.Vector3; rotation: THREE.Quaternion; scale: THREE.Vector3; opacity: number;
+    }>();
+    const voyageOpacity = new Map<THREE.Object3D, number>();
+    let transitionAnchors: TransitionAnchor[] = [];
     const texture = glowTexture();
     const galaxyModels = new Map<string, ReturnType<typeof createGalaxy>>();
     const answerStars = new Map<string, ReturnType<typeof createStar>>();
@@ -702,6 +725,33 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       const latest = propsRef.current,
         depth = clamp(latest.depth, 0, 2),
         level = stageAt(depth);
+      const voyage = latest.reducedMotion ? null : latest.voyage;
+      const collapsing = voyage?.phase === "collapse" || voyage?.phase === "wait";
+      if (collapsing && !infallActive) {
+        infallPoses.clear();
+        const objects = [...galaxyModels.values()].map((model) => model.group)
+          .concat([...answerStars.values()].map((star) => star.group));
+        if (system) objects.push(system.group);
+        objects.forEach((object) => infallPoses.set(object, {
+          position: object.position.clone(), rotation: object.quaternion.clone(), scale: object.scale.clone(),
+          opacity: voyageOpacity.get(object) ?? 1,
+        }));
+        const { q, a } = focus();
+        const anchor = (id: string, object: THREE.Object3D, color: string, radius: number): TransitionAnchor[] => {
+          const pose = infallPoses.get(object);
+          return pose && pose.opacity > 0.001 && object.visible
+            ? [{ id, position: pose.position.clone(), color, radius: radius * Math.max(pose.scale.x, pose.scale.y) }]
+            : [];
+        };
+        transitionAnchors = level === 2 && a
+          ? anchor(a.answer.id, system?.group ?? answerStars.get(a.answer.id)!.group, q.question.color, 15)
+          : level === 1
+            ? [...anchor(q.question.id, galaxyModels.get(q.question.id)!.group, q.question.color, q.spec.radius),
+              ...q.answers.flatMap((body) => anchor(body.answer.id, answerStars.get(body.answer.id)!.group, q.question.color, 3))]
+            : layout.flatMap((node) => anchor(node.question.id, galaxyModels.get(node.question.id)!.group, node.question.color, node.spec.radius));
+        capturedWidth = 0;
+      }
+      infallActive = !!collapsing;
       const reading =
         pointers.size > 0 ||
         isTyping(document.activeElement) ||
@@ -709,12 +759,14 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         !!container.querySelector(
           ".galaxy-label:hover,.galaxy-label:focus-within,.galaxy-hub:hover,.galaxy-hub:focus-within",
         );
-      const paused = reading || latest.reducedMotion;
+      const paused = reading || latest.reducedMotion || !!voyage;
       if (!paused) elapsed += dt;
       // Only the individual galaxy turns. Its center stays fixed in the cluster,
       // and every answer uses the exact same local-to-world rotation as the arms.
       layout.forEach((node) => {
         const model = galaxyModels.get(node.question.id)!;
+        model.group.position.copy(node.position);
+        model.group.scale.setScalar(1);
         let angle = rotationMemory.current.get(node.question.id) ?? 0;
         if (!paused)
           angle += dt * (node.spec.kind === "elliptical" ? 0.0012 : 0.0022);
@@ -727,7 +779,10 @@ export default function GalaxyScene(props: GalaxySceneProps) {
             .copy(body.localPosition)
             .applyQuaternion(model.group.quaternion)
             .add(node.position);
-          answerStars.get(body.answer.id)!.group.position.copy(body.position);
+          const star = answerStars.get(body.answer.id)!;
+          star.group.position.copy(body.position);
+          star.group.scale.setScalar(1);
+          star.group.quaternion.identity();
         });
       });
       const { q, a } = focus();
@@ -785,7 +840,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       desiredTarget.set(0, 0, 0).lerp(q.position, inward);
       if (a) desiredTarget.lerp(a.position, intimate);
       desiredTarget.add(pan);
-      const ease = latest.reducedMotion ? 1 : 1 - Math.exp(-dt * 5);
+      const ease = collapsing ? 0 : latest.reducedMotion || voyage?.phase === "birth" ? 1 : 1 - Math.exp(-dt * 5);
       yaw = THREE.MathUtils.lerp(yaw, yawTarget, ease);
       pitch = THREE.MathUtils.lerp(pitch, pitchTarget, ease);
       target.lerp(desiredTarget, ease);
@@ -810,6 +865,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       };
       syncPlanets(depth);
       if (system) {
+        system.group.scale.setScalar(1);
         system.setOpacity(smooth((depth - 1.25) / 0.6));
         system.update(elapsed, latest.reducedMotion, paused);
       }
@@ -874,6 +930,76 @@ export default function GalaxyScene(props: GalaxySceneProps) {
           star.update(elapsed, latest.reducedMotion, paused);
         });
       });
+      if (voyage) {
+        const progress = voyage.phase === "wait" ? 1 : voyage.phase === "birth" && !voyage.ready
+          ? 0 : clamp((time - voyage.startedAt) / (voyage.phase === "birth" ? BIRTH_MS : COLLAPSE_MS));
+        camera.getWorldDirection(infallNormal);
+        birthCenter.copy(target);
+        if (capturedWidth !== width || capturedHeight !== height) {
+          // Resolve the photographed hole through the actual CSS cover crop.
+          const picture = container.querySelector<HTMLElement>(".cosmic-picture");
+          const rect = picture?.getBoundingClientRect();
+          const bounds = container.getBoundingClientRect();
+          if (rect) {
+            const scale = Math.max(rect.width / 1672, rect.height / 941);
+            const align = width <= 760 ? 0.89 : 0.56;
+            holeScreen = {
+              x: rect.left - bounds.left + (rect.width - 1672 * scale) * align + 1483 * scale,
+              y: rect.top - bounds.top + (rect.height - 941 * scale) * 0.5 + 153 * scale,
+            };
+          } else holeScreen = { x: width * 0.95, y: height * 0.16 };
+          capturedWidth = width; capturedHeight = height;
+        }
+        const planeDistance = Math.max(1, camera.position.distanceTo(target));
+        const planeHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * planeDistance;
+        infallTarget.set((holeScreen.x / width - 0.5) * planeHeight * camera.aspect,
+          (0.5 - holeScreen.y / height) * planeHeight, -planeDistance)
+          .applyQuaternion(camera.quaternion).add(camera.position);
+        const actors = [...galaxyModels.values()].map((model) => model.group)
+          .concat([...answerStars.values()].map((star) => star.group));
+        if (system) actors.push(system.group);
+        actors.forEach((object, index) => {
+          let opacity: number;
+          if (collapsing) {
+            const base = infallPoses.get(object);
+            if (!base) { object.visible = false; return; }
+            const pose = sampleCollapse({ position: base.position, orientation: base.rotation, target: infallTarget, normal: infallNormal,
+              progress, index, count: actors.length });
+            object.position.copy(pose.position);
+            object.quaternion.copy(pose.rotation).multiply(base.rotation);
+            object.scale.copy(base.scale).multiply(pose.scale);
+            opacity = pose.opacity * base.opacity;
+          } else {
+            const pose = sampleBirth(progress, index, actors.length);
+            object.position.lerpVectors(birthCenter, object.position, pose.scale);
+            object.scale.multiplyScalar(pose.scale);
+            opacity = pose.opacity;
+          }
+          voyageOpacity.set(object, opacity);
+          // Fully swallowed bodies need no draw calls while the request waits.
+          object.visible = object.visible && opacity > 0.001;
+          object.traverse((child) => {
+            const material = (child as THREE.Mesh).material;
+            if (!material) return;
+            for (const item of Array.isArray(material) ? material : [material]) {
+              if (item instanceof THREE.ShaderMaterial && item.uniforms.uOpacity) item.uniforms.uOpacity.value *= opacity;
+              else item.opacity *= opacity;
+            }
+          });
+        });
+        if (comets) comets.setOpacity(0);
+        searchEffect.update({ phase: voyage.phase, progress, time: time / 1000, camera,
+          target: infallTarget, center: birthCenter, anchors: transitionAnchors });
+        container.style.setProperty("--voyage-text-opacity", String(collapsing ? 1 - smooth((progress - 0.03) / 0.26) : smooth((progress - 0.30) / 0.27)));
+        container.dataset.voyageProgress = progress.toFixed(3);
+        container.dataset.holeX = holeScreen.x.toFixed(1);
+        container.dataset.holeY = holeScreen.y.toFixed(1);
+      } else {
+        voyageOpacity.clear();
+        searchEffect.group.visible = false;
+        container.style.removeProperty("--voyage-text-opacity");
+        delete container.dataset.voyageProgress;
+      }
       container.dataset.motionPaused = String(paused);
       if (level > 0)
         container.dataset.starKind = a ? getStarStyle(a.answer.id).kind : "";
@@ -890,6 +1016,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       writeProjection(level, dt);
       projectionTick++;
       renderer.render(scene, camera);
+      if (voyage?.phase === "birth" && !voyage.ready) latest.onVoyageReady?.(voyage.id);
     };
     const nearestBody = (x: number, y: number) => {
       const rect = canvas.getBoundingClientRect();
@@ -937,6 +1064,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       }
     };
     const down = (event: PointerEvent) => {
+      if (propsRef.current.voyage) return;
       if (event.button !== 0 && event.button !== 2) return;
       canvas.focus({ preventScroll: true });
       canvas.setPointerCapture(event.pointerId);
@@ -1038,6 +1166,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const visibility = () => {
       hidden = document.hidden || contextLost;
       cancelAnimationFrame(frame);
+      searchEffect.dispose();
       keys.clear();
       if (!hidden) {
         lastTime = 0;
@@ -1131,6 +1260,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       const latest = propsRef.current;
+      if (latest.voyage) return;
       const delta =
         event.deltaMode === 1
           ? event.deltaY * 16
@@ -1184,6 +1314,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       ref={containerRef}
       className={`galaxy-scene galaxy-spatial ${dragging ? "galaxy-is-dragging" : ""} ${!webglAvailable ? "galaxy-is-fallback" : ""} ${props.reducedMotion ? "galaxy-reduced-motion" : ""}`}
       data-depth={stage}
+      data-voyage={props.voyage?.phase ?? "idle"}
       aria-label="知识宇宙探索"
     >
       <CosmicBackdrop depth={props.depth} reducedMotion={props.reducedMotion} />
@@ -1198,7 +1329,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         <span className="galaxy-fallback-notice">二维星图</span>
       )}
       {layers.map((layer) => {
-        const exiting = layer.phase === "exit";
+        const exiting = layer.phase === "exit" || props.voyage?.phase === "collapse" || props.voyage?.phase === "wait";
         const question =
           layer.key === layerKey ? selectedQuestion : layer.question;
         const answer = layer.key === layerKey ? selectedAnswer : layer.answer;
@@ -1221,7 +1352,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         const text = (value: string) => (
           <StellarText
             text={value}
-            phase={layer.phase}
+            phase={exiting ? "exit" : "enter"}
             reducedMotion={props.reducedMotion}
           />
         );
@@ -1231,10 +1362,10 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         return (
           <div
             key={layer.id}
-            className={`galaxy-content-layer galaxy-content-${layer.stage} galaxy-content-${layer.phase}`}
-            aria-hidden={exiting || undefined}
+            className={`galaxy-content-layer galaxy-content-${layer.stage} galaxy-content-${exiting ? "exit" : "enter"}`}
+            aria-hidden={exiting || !!props.voyage || undefined}
             ref={(element) => {
-              if (element) element.inert = exiting;
+              if (element) element.inert = exiting || !!props.voyage;
             }}
           >
             {layer.stage > 0 && question && (
@@ -1464,7 +1595,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
                         onDoubleClick={isParagraph ? enter : undefined}
                       >
                         {text(
-                          isParagraph && title.length > 180
+                          isParagraph && title.length > 180 && !hasRichSyntax(title)
                             ? `${title.slice(0, 180)}…`
                             : title,
                         )}

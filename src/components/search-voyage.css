@@ -1,0 +1,37 @@
+.search-voyage-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.galaxy-scene:not([data-voyage="idle"]) .galaxy-content-layer {
+  opacity: var(--voyage-text-opacity, 0);
+}
+.galaxy-scene:not([data-voyage="idle"]) .galaxy-content-layer,
+.galaxy-scene:not([data-voyage="idle"]) .galaxy-content-layer * {
+  pointer-events: none !important;
+}
+.galaxy-scene:not([data-voyage="idle"]) .galaxy-canvas { cursor: progress; }
+/* The accessible fallback still fades the content while network work completes. */
+.galaxy-is-fallback[data-voyage="collapse"] .galaxy-content-layer {
+  animation: galaxy-chrome-depart 0.65s both;
+}
+.galaxy-is-fallback[data-voyage="birth"] .galaxy-content-layer {
+  animation: galaxy-chrome-arrive 1s both;
+  opacity: 1;
+}
+
+/* Clip readable content only; dust remains free to dissolve outside the glyphs. */
+.galaxy-spatial .galaxy-label-title { overflow: visible; }
+.galaxy-spatial .galaxy-label-title .stellar-text-content {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.galaxy-spatial .galaxy-label-paragraph .stellar-text-content { -webkit-line-clamp: 6; }
+@media (max-width: 760px) {
+  .galaxy-spatial .galaxy-label-title .stellar-text-content { -webkit-line-clamp: 4; }
+}

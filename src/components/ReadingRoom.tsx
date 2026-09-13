@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { ArrowUpRight, Backpack, Check, PenLine, X } from "lucide-react";
 import type { Answer } from "../types";
+import RichText from "./RichText";
 
 interface Props {
   answer: Answer;
@@ -92,7 +93,7 @@ export default function ReadingRoom({
         <div className="reader-scroll">
           <div className="reader-article-heading">
             <span className="reader-glyph">✦</span>
-            <h1>{answer.title}</h1>
+            <h1><RichText text={answer.title} inline /></h1>
             <div className="reader-byline">
               <span className="answer-avatar">{answer.author.slice(0, 1)}</span>
               <strong>{answer.author}</strong>
@@ -109,19 +110,22 @@ export default function ReadingRoom({
           <article className="reader-prose">
             {answer.paragraphs.length ? (
               answer.paragraphs.map((paragraph, index) => (
-                <button
+                <div
                   key={`${answer.id}-${index}`}
                   className={`reader-paragraph ${selectedParagraph === index ? "selected" : ""}`}
                   data-paragraph={index}
-                  aria-label={`选中第 ${index + 1} 段`}
-                  aria-pressed={selectedParagraph === index}
                   onClick={() => onSelectParagraph(index, paragraph)}
                 >
-                  <span className="reader-paragraph-index">
+                  <button
+                    className="reader-paragraph-index reader-paragraph-select"
+                    aria-label={`选中第 ${index + 1} 段`}
+                    aria-pressed={selectedParagraph === index}
+                    onClick={event => { event.stopPropagation(); onSelectParagraph(index, paragraph); }}
+                  >
                     {String(index + 1).padStart(2, "0")}
-                  </span>
-                  <span>{paragraph}</span>
-                </button>
+                  </button>
+                  <RichText text={paragraph} />
+                </div>
               ))
             ) : (
               <p className="reader-content-note">

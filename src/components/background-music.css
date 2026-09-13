@@ -79,6 +79,7 @@
 }
 .music-volume-row output { width: 29px; text-align: right; color: #9ab8c1; font-size: 10px; }
 .music-error { margin: 9px 0 0; font-size: 11px; color: #ead1bc; line-height: 1.7; }
+.music-status { margin: 9px 0 0; font-size: 11px; color: #9ab8c1; line-height: 1.7; }
 @media (max-width: 760px) {
   .music-projection { top: 39px; right: -25px; }
 }

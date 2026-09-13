@@ -45,6 +45,9 @@ import {
 import GalaxyScene from "./components/GalaxyScene";
 import ReadingRoom from "./components/ReadingRoom";
 import BackgroundMusic from "./components/BackgroundMusic";
+import RichText from "./components/RichText";
+import { BIRTH_MS, COLLAPSE_MS, type SearchVoyage } from "./lib/search-voyage";
+import "./components/search-voyage.css";
 import type {
   Answer,
   ExploreResponse,
@@ -185,6 +188,19 @@ export default function App() {
   const [searchText, setSearchText] = useState(entry.query);
   const [data, setData] = useState<ExploreResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [voyage, setVoyage] = useState<SearchVoyage | null>(null);
+  const voyageRef = useRef(voyage);
+  voyageRef.current = voyage;
+  const searchSerial = useRef(0);
+  const finishCollapse = useRef<(() => void) | null>(null);
+  const sceneSnapshot = useRef<{
+    questions: Question[];
+    questionId: string | null;
+    answerId: string | null;
+    depth: number;
+    paragraph: number | null;
+    quote?: string;
+  } | null>(null);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(
@@ -238,6 +254,31 @@ export default function App() {
     () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
   const searchRef = useRef<HTMLInputElement>(null);
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const change = () => setReducedMotion(media.matches);
+    media.addEventListener("change", change);
+    return () => media.removeEventListener("change", change);
+  }, []);
+  useEffect(() => {
+    if (reducedMotion) {
+      finishCollapse.current?.();
+      setVoyage(null);
+    }
+  }, [reducedMotion]);
+  const voyageReady = useCallback((id: number) => {
+    setVoyage((current) => current?.id === id && current.phase === "birth" && !current.ready
+      ? { ...current, ready: true, startedAt: performance.now() } : current);
+  }, []);
+  useEffect(() => {
+    if (voyage?.phase !== "birth" || !voyage.ready) return;
+    const id = voyage.id;
+    const timer = window.setTimeout(() => setVoyage((current) =>
+      current?.id === id && current.phase === "birth" ? null : current), BIRTH_MS);
+    return () => clearTimeout(timer);
+  }, [voyage?.id, voyage?.phase, voyage?.startedAt, voyage?.ready]);
   const pendingVisit = useRef<{ questionId: string; answerId?: string } | null>(
     null,
   );
@@ -310,6 +351,26 @@ export default function App() {
   );
   useEffect(() => {
     const controller = new AbortController();
+    const serial = ++searchSerial.current;
+    const previousVoyage = voyageRef.current;
+    const animateSearch = !reducedMotionRef.current && !pendingVisit.current && !!sceneSnapshot.current?.questions.length
+      && (!!data?.questions.length || !!previousVoyage);
+    const startedAt = animateSearch && previousVoyage && previousVoyage.phase !== "birth"
+      ? previousVoyage.startedAt : performance.now();
+    const remaining = animateSearch ? Math.max(0, COLLAPSE_MS - (performance.now() - startedAt)) : 0;
+    let collapseTimer = 0;
+    const minimum = new Promise<void>((resolve) => {
+      if (!animateSearch) { resolve(); return; }
+      const finish = () => { clearTimeout(collapseTimer); resolve(); };
+      finishCollapse.current = finish;
+      controller.signal.addEventListener("abort", finish, { once: true });
+      collapseTimer = window.setTimeout(() => {
+        if (!controller.signal.aborted && !reducedMotionRef.current)
+          setVoyage({ id: serial, phase: "wait", startedAt });
+        resolve();
+      }, remaining);
+    });
+    setVoyage(animateSearch ? { id: serial, phase: remaining ? "collapse" : "wait", startedAt } : null);
     setLoading(true);
     setError("");
     setDepth(0);
@@ -335,6 +396,7 @@ export default function App() {
         return result as ExploreResponse;
       })
       .then(async (result) => {
+        await minimum;
         if (controller.signal.aborted) return;
         const pending = pendingVisit.current;
         let destination = pending
@@ -378,6 +440,7 @@ export default function App() {
           }
         }
         if (controller.signal.aborted) return;
+        if (animateSearch) setResetToken((value) => value + 1);
         setData(result);
         const selected = destination?.question ?? result.questions[0];
         setSelectedQuestionId(selected?.id ?? null);
@@ -393,17 +456,28 @@ export default function App() {
             );
           pendingVisit.current = null;
         }
+        if (animateSearch && !reducedMotionRef.current && result.questions.length) {
+          // Start the full visual duration after Three.js has presented its
+          // first frame; shader preparation must not consume the ignition.
+          setVoyage({ id: serial, phase: "birth", startedAt: performance.now(), ready: false });
+        } else setVoyage(null);
       })
-      .catch((reason) => {
-        if (!controller.signal.aborted)
+      .catch(async (reason) => {
+        await minimum;
+        if (!controller.signal.aborted) {
+          setVoyage(null);
           setError(
             reason instanceof Error ? reason.message : "连接中断，请稍后重试",
           );
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      clearTimeout(collapseTimer);
+    };
   }, [query, retry]);
 
   useEffect(() => {
@@ -500,7 +574,9 @@ export default function App() {
     notify,
   ]);
 
-  function chooseQuestion(id: string) {
+  function chooseQuestion(id: string, interruptVoyage = false) {
+    if (voyage && !interruptVoyage) return;
+    if (interruptVoyage) setVoyage(null);
     const question = questions.find((item) => item.id === id);
     setSelectedQuestionId(id);
     setSelectedAnswerId(question?.answers[0]?.id ?? null);
@@ -509,6 +585,7 @@ export default function App() {
     setReaderOpen(false);
   }
   function chooseAnswer(id: string) {
+    if (voyage) return;
     setSelectedAnswerId(id);
     setSelectedParagraph(null);
     setSelectedQuote(undefined);
@@ -621,7 +698,7 @@ export default function App() {
     window.history.replaceState({}, "", url);
     const destination = locateStop(questions, item);
     if (query === item.query && destination) {
-      chooseQuestion(destination.question.id);
+      chooseQuestion(destination.question.id, true);
       if (destination.answerId) setSelectedAnswerId(destination.answerId);
       setDepth(destination.answerId ? 2 : 1);
     } else {
@@ -853,6 +930,7 @@ export default function App() {
     setReaderOpen(true);
   }
   function changeDepth(value: number) {
+    if (voyage) return;
     setDepth(
       Math.max(
         0,
@@ -862,6 +940,14 @@ export default function App() {
     setReaderOpen(false);
   }
   const modalActive = !!drawer || !!reflectionTarget || readerOpen;
+  if ((!loading && !voyage || voyage?.phase === "birth") && questions.length) {
+    sceneSnapshot.current = {
+      questions, questionId: selectedQuestion?.id ?? null,
+      answerId: selectedAnswer?.id ?? null, depth,
+      paragraph: selectedParagraph, quote: selectedQuote,
+    };
+  }
+  const departingScene = voyage && voyage.phase !== "birth" ? sceneSnapshot.current : null;
 
   return (
     <main
@@ -873,19 +959,21 @@ export default function App() {
         {...(modalActive ? { inert: "" } : {})}
       >
         <GalaxyScene
-          questions={questions}
-          selectedQuestionId={selectedQuestion?.id ?? null}
-          selectedAnswerId={selectedAnswer?.id ?? null}
-          depth={depth}
+          questions={departingScene?.questions ?? questions}
+          selectedQuestionId={departingScene ? departingScene.questionId : selectedQuestion?.id ?? null}
+          selectedAnswerId={departingScene ? departingScene.answerId : selectedAnswer?.id ?? null}
+          depth={departingScene?.depth ?? depth}
+          voyage={voyage}
+          onVoyageReady={voyageReady}
           onDepthChange={changeDepth}
           onSelectQuestion={chooseQuestion}
           onSelectAnswer={chooseAnswer}
-          flightMode={flightMode && !modalActive}
+          flightMode={flightMode && !modalActive && !voyage}
           reducedMotion={reducedMotion}
           resetToken={resetToken}
           onOpenReader={openReader}
-          selectedParagraph={selectedParagraph}
-          selectedQuote={selectedQuote}
+          selectedParagraph={departingScene ? departingScene.paragraph : selectedParagraph}
+          selectedQuote={departingScene ? departingScene.quote : selectedQuote}
           onSelectParagraph={selectParagraph}
         />
       </div>
@@ -968,7 +1056,7 @@ export default function App() {
             </button>
           </nav>
         </header>
-        {loading && (
+        {loading && !voyage && (
           <div className="center-message loading-message" role="status">
             <span className="loading-orbit">
               <Orbit size={31} />
@@ -976,6 +1064,9 @@ export default function App() {
             <h2>正在展开知识星海</h2>
           </div>
         )}
+        {voyage && <span className="search-voyage-status" role="status">
+          {voyage.phase === "birth" ? "新的知识星海正在涌现" : "正在穿越黑洞，寻找新的星光"}
+        </span>}
         {!loading && (error || !questions.length) && (
           <div className="center-message empty-universe" role="status">
             <Telescope size={34} />
@@ -1241,10 +1332,10 @@ export default function App() {
                           className="saved-card-title"
                           onClick={() => visit(item)}
                         >
-                          {item.title}
+                          <RichText text={item.title} inline />
                           <ArrowUpRight size={16} />
                         </button>
-                        <p>{item.excerpt}</p>
+                        <p><RichText text={item.excerpt} inline /></p>
                         <div className="saved-card-bottom">
                           <span>{item.author || "一个值得继续探索的问题"}</span>
                           <time>{timeLabel(item.savedAt)}</time>
@@ -1295,8 +1386,8 @@ export default function App() {
                         </IconButton>
                       </div>
                       <h3>{item.targetTitle}</h3>
-                      {item.quote && <blockquote>{item.quote}</blockquote>}
-                      <p className="reflection-content">{item.text}</p>
+                      {item.quote && <blockquote><RichText text={item.quote} inline /></blockquote>}
+                      <p className="reflection-content"><RichText text={item.text} inline /></p>
                       <time>{timeLabel(item.createdAt)}</time>
                     </article>
                   ))
@@ -1347,7 +1438,7 @@ export default function App() {
                           {stop.type === "question" ? "走进问题" : "停留阅读"} ·{" "}
                           {timeLabel(stop.visitedAt)}
                         </small>
-                        <strong>{stop.title}</strong>
+                        <strong><RichText text={stop.title} inline /></strong>
                         <em>{stop.query || "自由漫游"}</em>
                       </span>
                       <ArrowUpRight size={15} />
@@ -1552,10 +1643,10 @@ export default function App() {
           onClose={() => setReflectionTarget(null)}
           className="reflection-modal"
         >
-          <p className="reflection-about">关于 · {reflectionTarget.title}</p>
+          <p className="reflection-about">关于 · <RichText text={reflectionTarget.title} inline /></p>
           {reflectionTarget.quote && (
             <blockquote className="reflection-quote">
-              {reflectionTarget.quote}
+              <RichText text={reflectionTarget.quote} inline />
             </blockquote>
           )}
           <form onSubmit={saveReflection}>

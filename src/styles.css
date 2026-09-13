@@ -1,13 +1,9 @@
 :root {
-  font-family:
-    "DM Sans",
-    "Noto Sans SC",
-    -apple-system,
-    BlinkMacSystemFont,
-    sans-serif;
+  --font-reading: "Zhuque Fangsong", "FangSong", "仿宋", "STFangsong", "Noto Sans SC", serif;
+  font-family: var(--font-reading);
   color: #e5eee9;
   background: #070d15;
-  font-synthesis: none;
+  font-synthesis: weight style;
   font-weight: 400;
   --mint: #c8e4d3;
   --muted: #8ca1aa;

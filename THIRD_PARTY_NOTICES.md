@@ -24,8 +24,9 @@ Wanderwise 的 `src/components/GalaxyScene.tsx` 是独立编写的现代 Three.j
 
 - Noto Sans SC：Google / Adobe，SIL Open Font License 1.1。许可证随文件位于 `public/fonts/OFL-NotoSansSC.txt`。
 - DM Sans：项目字体作者，SIL Open Font License 1.1。许可证位于 `public/fonts/OFL-DMSans.txt`。
+- 朱雀仿宋（Zhuque Fangsong）v0.212：璇玑造字 / Zhejiang JadeFoci Technology，SIL Open Font License 1.1。来自[作者官方发布](https://github.com/TrionesType/zhuque/releases/tag/v0.212)，许可证位于 `public/fonts/OFL-ZhuqueFangsong.txt`。以完整 WOFF2 和首屏字形子集在本地提供，未改动字形；常规中文默认使用该仿宋字体，数学公式保留 KaTeX 数学字形。西文与部分符号源于同为 OFL 的 Alegreya，详见[字体作者说明](https://github.com/TrionesType/zhuque)。
 
-字体通过 Google Fonts 获取并转换为 WOFF2；中文首屏使用相同字体的字形子集，其他内容回退到完整字体。字体未作为单独收费产品提供。
+Noto Sans SC 和 DM Sans 通过 Google Fonts 获取并转换为 WOFF2。中文首屏使用相同字体的字形子集，其他内容回退到完整字体。字体未作为单独收费产品提供。
 
 ## 主要开源依赖
 
@@ -35,5 +36,6 @@ Wanderwise 的 `src/components/GalaxyScene.tsx` 是独立编写的现代 Three.j
 - Express：MIT。
 - Lucide：ISC。
 - Playwright：Apache-2.0。
+- markdown-it：MIT；KaTeX：MIT（自带数学字体按包内许可证分发）。公式渲染和字体均由应用本地提供，无第三方 CDN 请求。
 
 依赖的准确版本锁定在 `package-lock.json`，完整版权声明随对应 npm 包提供。

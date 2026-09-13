@@ -584,6 +584,10 @@ test('normal motion retains outgoing glyph dust until disintegration finishes', 
 test('wheel transitions release old reading scrims while the outgoing stardust is retained', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await arrive(page);
+  await enterQuestion(page);
+  // Keyboard focus keeps this navigation target paused while the newly loaded
+  // reading font settles; the test below exercises the actual wheel transition.
+  await active(page).getByRole('button', { name: `阅读观点：${answers[0].title}`, exact: true }).focus();
   await enterArticle(page);
   // Let the readable article settle, including its stronger paragraph scrims.
   await expect.poll(() => active(page).locator('.galaxy-hub').evaluate(node =>

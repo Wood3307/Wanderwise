@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import RichText from './RichText';
+import { paintGlyphMask } from '../lib/glyph-mask';
 
 type StellarTextProps = {
   text: string;
@@ -25,32 +27,15 @@ export default function StellarText({ text, phase, reducedMotion, className = ''
     const bounds = content.getBoundingClientRect();
     const width = Math.ceil(bounds.width), height = Math.ceil(bounds.height);
     if (!width || !height) return;
-    const computed = getComputedStyle(content);
     const padding = 74;
     const mask = document.createElement('canvas');
     mask.width = width; mask.height = height;
     const maskContext = mask.getContext('2d', { willReadFrequently: true });
     const context = canvas.getContext('2d');
     if (!maskContext || !context) return;
-    maskContext.font = `${computed.fontWeight} ${computed.fontSize} ${computed.fontFamily}`;
-    maskContext.textBaseline = 'top';
-    maskContext.fillStyle = '#fff';
-    const fontSize = parseFloat(computed.fontSize) || 15;
-    const lineHeight = parseFloat(computed.lineHeight) || fontSize * 1.7;
-    const letterSpacing = parseFloat(computed.letterSpacing) || 0;
-    const measure = (line: string) => maskContext.measureText(line).width + Math.max(0, Array.from(line).length - 1) * letterSpacing;
-    const drawLine = (line: string, top: number) => {
-      const lineWidth = measure(line);
-      let left = computed.textAlign === 'center' ? (width - lineWidth) / 2 : computed.textAlign === 'right' ? width - lineWidth : 0;
-      for (const character of Array.from(line)) { maskContext.fillText(character, left, top); left += maskContext.measureText(character).width + letterSpacing; }
-    };
-    let line = '', top = Math.max(0, (lineHeight - fontSize) / 2);
-    for (const character of Array.from(text)) {
-      if (character === '\n' || (line && measure(line + character) > width - 1)) {
-        drawLine(line, top); top += lineHeight; line = character === '\n' ? '' : character;
-      } else line += character;
-    }
-    drawLine(line, top);
+    const sampled = paintGlyphMask(content, maskContext);
+    canvas.dataset.glyphCount = String(sampled.glyphs);
+    canvas.dataset.mathGlyphCount = String(sampled.mathGlyphs);
     const pixels = maskContext.getImageData(0, 0, width, height).data;
     const particles: { x: number; y: number; dx: number; dy: number; size: number; delay: number }[] = [];
     const step = width * height > 30000 ? 4 : 3;
@@ -61,6 +46,7 @@ export default function StellarText({ text, phase, reducedMotion, className = ''
       const angle = random * Math.PI * 2;
       particles.push({ x: x + padding, y: y + padding, dx: Math.cos(angle) * (18 + random * 100), dy: Math.sin(angle) * (18 + random * 65), size: random > .84 ? 1.6 : .8, delay: random * .13 });
     }
+    canvas.dataset.particleCount = String(particles.length);
     const ratio = Math.min(devicePixelRatio || 1, 1.5);
     canvas.width = (width + padding * 2) * ratio;
     canvas.height = (height + padding * 2) * ratio;
@@ -88,7 +74,7 @@ export default function StellarText({ text, phase, reducedMotion, className = ''
     return () => cancelAnimationFrame(frame);
   }, [text, phase, reducedMotion, fontRevision]);
   return <span className={`stellar-text stellar-text-${phase} ${className}`}>
-    <span ref={contentRef} className="stellar-text-content">{text}</span>
+    <span ref={contentRef} className="stellar-text-content"><RichText text={text} inline /></span>
     {!reducedMotion && <canvas ref={canvasRef} className="stellar-text-dust" aria-hidden="true" />}
   </span>;
 }

@@ -52,23 +52,49 @@ export class ApiError extends Error {
   }
 }
 
-export function plainText(value: unknown): string {
+function decodeEntities(value: string): string {
+  return value.replace(/&(?:amp|lt|gt|quot|apos|nbsp);|&#(?:x[\da-f]+|\d+);/gi, (entity) => {
+    const named: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&nbsp;': ' ' };
+    if (named[entity.toLowerCase()]) return named[entity.toLowerCase()];
+    const number = entity.toLowerCase().startsWith('&#x') ? parseInt(entity.slice(3, -1), 16) : parseInt(entity.slice(2, -1), 10);
+    return number > 0 && number <= 0x10ffff && !(number >= 0xd800 && number <= 0xdfff) ? String.fromCodePoint(number) : '';
+  });
+}
+
+export function plainText(value: unknown, preserveFormatting = false): string {
   if (typeof value !== 'string') return '';
-  return value
+  const input = value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+  // Markdown code and TeX are source text, even when they contain angle brackets.
+  // Protect complete literal spans before removing real HTML around them.
+  const literals: string[] = [];
+  let marker = '\uE000literal:';
+  while (input.includes(marker)) marker += ':';
+  const protect = (literal: string) => {
+    literals.push(literal);
+    return `${marker}${literals.length - 1}\uE001`;
+  };
+  const restore = (text: string) => text.replace(new RegExp(`${marker}(\\d+)\uE001`, 'g'), (_, index: string) => literals[Number(index)]);
+  const protectedValue = input.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1|(`+)[^\n]*?\2|(?<!\\)\$\$[\s\S]*?(?<!\\)\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|(?<!\\)\$(?!\$)(?:\\.|[^$\\\n])+?(?<!\\)\$/g, protect);
+  let text = protectedValue
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<(?:br\s*\/?|\/p|\/div|\/li)>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&(?:amp|lt|gt|quot|apos|nbsp);|&#(?:x[\da-f]+|\d+);/gi, (entity) => {
-      const named: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&nbsp;': ' ' };
-      if (named[entity.toLowerCase()]) return named[entity.toLowerCase()];
-      const number = entity.toLowerCase().startsWith('&#x') ? parseInt(entity.slice(3, -1), 16) : parseInt(entity.slice(2, -1), 10);
-      return number > 0 && number <= 0x10ffff && !(number >= 0xd800 && number <= 0xdfff) ? String.fromCodePoint(number) : '';
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
+      // Zhihu equation images carry source TeX in alt; do not infer missing formulae.
+      if (!/\b(?:class\s*=\s*["'][^"']*\bztext-math\b|eeimg\s*=)/i.test(tag)) return '';
+      const alt = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+      const formula = alt?.[1] ?? alt?.[2];
+      if (!formula) return '';
+      const source = decodeEntities(restore(formula));
+      return protect(/^(?:\$|\\[[(])/.test(source) ? source : `$${source}$`);
     })
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/<(?:br\s*\/?|\/p|\/div|\/li)>/gi, '\n')
+    .replace(/<\/?[a-z][\w:-]*(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi, '');
+  text = decodeEntities(text);
+  if (!preserveFormatting) text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  // Reinsert literals after whitespace handling, retaining code indentation and TeX spacing.
+  text = restore(text);
+  return preserveFormatting ? text.replace(/^\n+|\n+$/g, '') : text;
 }
 
 export function extractKeywords(query: string): string[] {
@@ -104,7 +130,46 @@ function normalizedTitle(value: string): string {
   return sourceTitle(value).normalize('NFKC').toLowerCase().replace(/[\s?？!！。]+/g, '');
 }
 function paragraphs(value: string): string[] {
-  return value.split(/\n+/).map((part) => part.trim()).filter(Boolean);
+  const lines = value.split('\n');
+  const output: string[] = [];
+  const listItem = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])\s+/;
+  const indented = /^(?: {4}|\t)/;
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    if (!line.trim()) { index++; continue; }
+    let end = index + 1;
+    const fence = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    const dollar = /(?<!\\)\$\$/.exec(line);
+    const bracket = line.indexOf('\\[');
+    const mathEnd = dollar && !/(?<!\\)\$\$/.test(line.slice(dollar.index + 2)) ? '$$'
+      : bracket >= 0 && !line.slice(bracket + 2).includes('\\]') ? '\\]' : undefined;
+    if (fence) {
+      const close = new RegExp(`^[ \\t]{0,3}${fence[0]}{${fence.length},}[ \\t]*$`);
+      while (end < lines.length && !close.test(lines[end])) end++;
+      if (end < lines.length) end++;
+    } else if (mathEnd) {
+      while (end < lines.length && !(mathEnd === '$$' ? /(?<!\\)\$\$/.test(lines[end]) : lines[end].includes(mathEnd))) end++;
+      if (end < lines.length) end++;
+    } else if (listItem.test(line) || /^[ \t]{0,3}>/.test(line)) {
+      // Keep a Markdown list/quote and its lazy continuation lines together.
+      while (end < lines.length) {
+        if (lines[end].trim()) { end++; continue; }
+        let next = end + 1;
+        while (next < lines.length && !lines[next].trim()) next++;
+        if (next < lines.length && (listItem.test(lines[next]) || indented.test(lines[next]) || /^[ \t]{0,3}>/.test(lines[next]))) end = next;
+        else break;
+      }
+    } else if (indented.test(line)) {
+      while (end < lines.length && (indented.test(lines[end]) || (!lines[end].trim() && indented.test(lines[end + 1] ?? '')))) end++;
+    } else if (line.includes('|') && /^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$/.test(lines[end] ?? '')) {
+      end++;
+      while (end < lines.length && lines[end].includes('|') && lines[end].trim()) end++;
+    }
+    const part = lines.slice(index, end).join('\n');
+    output.push(end > index + 1 || indented.test(line) ? part : part.trim());
+    index = end;
+  }
+  return output;
 }
 function matchScore(title: string, body: string, terms: string[]): number {
   if (!terms.length) return 0;
@@ -173,7 +238,7 @@ export function adaptSearch(items: SearchItem[], query: string): Question[] {
     const knownIds = titleIds.get(normalizedTitle(title));
     const questionId = record.questionId ?? (knownIds?.size === 1 ? [...knownIds][0] : undefined);
     const id = type === 'article' ? `article-${contentId ?? idHash(url)}` : questionId ? `question-${questionId}` : `title-${idHash(normalizedTitle(title))}`;
-    const content = plainText(item.ContentText).slice(0, 12000);
+    const content = plainText(item.ContentText, true).slice(0, 12000);
     const lexical = matchScore(title, content, terms);
     const relevance = Math.min(1, Math.max(0.3, 0.45 + lexical * 0.4 + (1 - index / 10) * 0.15));
     let question = groups.get(id);
@@ -206,8 +271,8 @@ export function adaptSearch(items: SearchItem[], query: string): Question[] {
 
 export function adaptPublicAnswer(item: PublicItem, detail?: PublicDetail, query = ''): Answer {
   const title = plainText(detail?.chapter_name || item.title).slice(0, 400) || '未提供标题';
-  const content = plainText(detail?.content).slice(0, 20000);
-  const intro = plainText(detail?.introduction || item.description);
+  const content = plainText(detail?.content, true).slice(0, 20000);
+  const intro = plainText(detail?.introduction || item.description, true);
   return withHighlights({
     id: `knowledge-${item.work_id}`,
     workId: item.work_id,

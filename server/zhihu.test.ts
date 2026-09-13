@@ -57,6 +57,74 @@ test('source URLs, identifiers and markup do not create executable or arbitrary 
   assert.equal(plainText('<script>evil()</script><p>正文 &amp; <em>关键词</em></p><style>hidden</style>'), '正文 & 关键词');
 });
 
+test('search and public adapters preserve complete source math, Markdown blocks and quote locations', () => {
+  const blocks = [
+    '普通第一段依然独立，包含学习方法和注意力之间的具体关系。',
+    '普通第二段依然独立，建议根据实际反馈调整学习目标。',
+    '比较符必须保持原样：$a < b < c > d$，以及 `$x<b<c>d$`。',
+    '$$\n\\begin{aligned}\n  a &< b \\\\\n  c &> d\n\\end{aligned}\n$$',
+    '\\[\n  \\sum_{n=1}^{N} n = \\frac{N(N+1)}{2}\n\\]',
+    '```python\nif a < b:\n    print("<span>literal code</span>")\n\n    print("keep  two spaces")\n```',
+    '- **制定目标**：先确定需要解决的具体问题。\n  - 检查条件与假设。\n- **实践反馈**：根据实践结果修正判断。',
+    '| 方法 | 适用情况 |\n| --- | --- |\n| 实践 | 验证具体的学习目标 |',
+    '结尾保持可定位的原文段落，公式与代码都不是新增或改写的内容。',
+  ];
+  const content = blocks.slice(0, 2).join('\n') + '\n\n' + blocks.slice(2).join('\n\n');
+  const fromSearch = adaptSearch([{ ...answerItem, ContentText: content }], '学习')[0].answers[0];
+  const fromPublic = adaptPublic({ ...snapshot, details: { '123': { ...snapshot.details['123'], content } } }, '')[0].answers[0];
+  for (const answer of [fromSearch, fromPublic]) {
+    assert.deepEqual(answer.paragraphs, blocks);
+    assert.ok(answer.highlights!.length > 0);
+    for (const highlight of answer.highlights!) {
+      assert.ok(answer.paragraphs[highlight.paragraphIndex].includes(highlight.text));
+      assert.ok(content.includes(highlight.text));
+    }
+  }
+  assert.equal(plainText('$a < b < c > d$'), '$a < b < c > d$');
+  assert.equal(plainText('a < b < c > d'), 'a < b < c > d');
+});
+
+test('HTML extraction keeps established paragraph boundaries and preserves explicit equation alt text', () => {
+  const content = '<script>privateBadCode()</script><style>hidden-css</style><!-- hidden comment -->'
+    + '<p>原有 HTML 段落 &amp; <strong>强调</strong>。</p>'
+    + '<p>公式：<img class="ztext-math" alt="a &lt; b &lt; c &gt; d" src="https://example.test/equation" />。</p>'
+    + '<div>另一段。<br>换行仍然独立。</div>';
+  const answer = adaptSearch([{ ...answerItem, ContentText: content }], '')[0].answers[0];
+  assert.deepEqual(answer.paragraphs, ['原有 HTML 段落 & 强调。', '公式：$a < b < c > d$。', '另一段。', '换行仍然独立。']);
+  assert.ok(!JSON.stringify(answer).includes('privateBadCode'));
+  assert.ok(!JSON.stringify(answer).includes('hidden-css'));
+  assert.ok(!JSON.stringify(answer).includes('hidden comment'));
+  const indented = adaptSearch([{ ...answerItem, ContentText: '    if a < b:\n        print(a)\n\n下一段。' }], '')[0].answers[0];
+  assert.deepEqual(indented.paragraphs, ['    if a < b:\n        print(a)', '下一段。']);
+  const delimitedAlt = adaptSearch([{ ...answerItem, ContentText: '<p><img eeimg="1" alt="$a<b<c>d$"></p>' }], '')[0].answers[0];
+  assert.deepEqual(delimitedAlt.paragraphs, ['$a<b<c>d$']);
+  const windowsCode = adaptSearch([{ ...answerItem, ContentText: '```python\r\nif a < b:\r\n    print(a)\r\n```\r\n\r\n下一段。' }], '')[0].answers[0];
+  assert.deepEqual(windowsCode.paragraphs, ['```python\nif a < b:\n    print(a)\n```', '下一段。']);
+});
+
+test('HTTP search delivers intact rich source blocks to the reader and highlight endpoint', async (context) => {
+  const formula = '$$\n  E = mc^2\n$$';
+  const code = '~~~python\nif a < b:\n    print("preserve  indentation")\n~~~';
+  const list = '1. 明确学习目标，选择需要验证的关键问题。\n2. 根据实际反馈调整方法，并检查每一个前提。';
+  const content = ['建议以具体的学习目标组织知识，下面的公式、代码和步骤均保留原文。', formula, code, list].join('\n\n');
+  const service = new ZhihuService({ snapshot, secret: 'test-only-secret', fetchImpl: async () => json({ Code: 0, Data: { Items: [{ ...answerItem, ContentText: content }] } }) });
+  const server: Server = createApp(service, { refreshPublic: false, distDir: '/tmp/wanderwise-no-dist' }).listen(0, '127.0.0.1');
+  context.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const origin = `http://127.0.0.1:${address.port}`;
+  const response = await (await fetch(`${origin}/api/explore?q=${encodeURIComponent('学习')}`)).json();
+  const answer = response.questions[0].answers[0];
+  assert.deepEqual(answer.paragraphs.slice(1), [formula, code, list]);
+  const selected = await (await fetch(`${origin}/api/answers/answer-101/highlights?questionId=question-50&q=${encodeURIComponent('学习')}`)).json();
+  assert.ok(selected.highlights.length > 0);
+  for (const quote of selected.highlights) {
+    assert.ok(answer.paragraphs[quote.paragraphIndex].includes(quote.text));
+    assert.ok(content.includes(quote.text));
+  }
+});
+
 test('public mode searches the real corpus and leaves unrelated searches empty', () => {
   assert.equal(adaptPublic(snapshot, '量子纠缠').length, 0);
   const result = adaptPublic(snapshot, '如何提高学习效率？');
