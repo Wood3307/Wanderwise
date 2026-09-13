@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx server/index.ts",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "tsx --test server/*.test.ts src/lib/*.test.ts",
+    "test": "tsx --test server/*.test.ts src/lib/*.test.ts src/components/space/*.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

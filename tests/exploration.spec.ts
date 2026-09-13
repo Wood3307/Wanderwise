@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 import type { Answer, ExploreResponse, Question, SavedItem } from '../src/types';
 
 const keys = { collection: 'wanderwise.collection.v1', reflections: 'wanderwise.reflections.v1', journey: 'wanderwise.journey.v1' };
@@ -47,6 +47,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 const active = (page: Page) => page.locator('.galaxy-content-enter');
+const visiblePageSize = (page: Page) => (page.viewportSize()?.width ?? 1440) < 760 ? 2 : 4;
 async function arrive(page: Page): Promise<void> {
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '0');
@@ -56,14 +57,16 @@ async function enterQuestion(page: Page): Promise<void> {
   await active(page).getByRole('button', { name: `进入星系：${question.title}`, exact: true }).click();
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '1');
   await expect(active(page).locator('.galaxy-hub-title')).toHaveText(question.title);
-  await expect(active(page).getByRole('button', { name: /^阅读观点：/ })).toHaveCount(3);
+  await expect(active(page).locator('.galaxy-hub')).toHaveAttribute('data-screen-x', /-?\d/);
+  await expect(active(page).getByRole('button', { name: /^阅读观点：/ })).toHaveCount(Math.min(answers.length, visiblePageSize(page)));
 }
 async function enterArticle(page: Page, answer = answers[0]): Promise<void> {
   if (await page.locator('.galaxy-scene').getAttribute('data-depth') === '0') await enterQuestion(page);
   await active(page).getByRole('button', { name: `阅读观点：${answer.title}`, exact: true }).click();
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '2');
   await expect(active(page).getByRole('button', { name: `阅读原文：${answer.title}`, exact: true })).toBeVisible();
-  await expect(active(page).locator('.galaxy-label-paragraph')).toHaveCount(4);
+  await expect(active(page).locator('.galaxy-hub')).toHaveAttribute('data-screen-x', /-?\d/);
+  await expect(active(page).locator('.galaxy-label-paragraph')).toHaveCount(Math.min(answer.highlights?.length ?? answer.paragraphs.length, visiblePageSize(page)));
 }
 async function openReader(page: Page, answer = answers[0]): Promise<void> {
   await active(page).getByRole('button', { name: `阅读原文：${answer.title}`, exact: true }).click();
@@ -75,6 +78,85 @@ async function openBag(page: Page): Promise<void> {
 }
 async function stored(page: Page, key: string): Promise<unknown[]> {
   return page.evaluate(storageKey => JSON.parse(localStorage.getItem(storageKey) || '[]'), key);
+}
+
+async function projectionSnapshot(label: Locator) {
+  return label.evaluate(element => {
+    const node = element as HTMLElement;
+    const body = node.querySelector<HTMLElement>('.galaxy-label-body')!;
+    const title = node.querySelector<HTMLElement>('.galaxy-label-title')!;
+    const marker = node.querySelector<HTMLElement>('.galaxy-star-marker')!.getBoundingClientRect();
+    const box = body.getBoundingClientRect();
+    let horizontal = true;
+    for (let current: HTMLElement | null = title; current && !current.classList.contains('galaxy-content-layer'); current = current.parentElement) {
+      const matrix = new DOMMatrixReadOnly(getComputedStyle(current).transform);
+      if (Math.abs(matrix.b) > 0.0001 || Math.abs(matrix.c) > 0.0001 || Math.abs(matrix.m13) > 0.0001 || Math.abs(matrix.m23) > 0.0001) horizontal = false;
+    }
+    return {
+      world: [Number(node.dataset.worldX), Number(node.dataset.worldY), Number(node.dataset.worldZ)],
+      screen: [Number(node.dataset.screenX), Number(node.dataset.screenY)],
+      marker: [marker.x + marker.width / 2, marker.y + marker.height / 2],
+      text: { x: box.x, y: box.y, width: box.width, height: box.height },
+      fontSize: Number.parseFloat(getComputedStyle(title).fontSize), horizontal,
+      visible: getComputedStyle(body).visibility !== 'hidden' && Number(getComputedStyle(body).opacity) > 0,
+    };
+  });
+}
+
+async function dragUncoveredCanvas(page: Page, dx = 74, dy = 26) {
+  const start = await page.locator('.galaxy-canvas').evaluate(canvas => {
+    const rect = canvas.getBoundingClientRect();
+    for (const fy of [0.76, 0.66, 0.56, 0.43, 0.84]) {
+      for (const fx of [0.5, 0.4, 0.6, 0.3, 0.7]) {
+        const x = rect.x + rect.width * fx;
+        const y = rect.y + rect.height * fy;
+        if (document.elementFromPoint(x, y) === canvas) return { x, y };
+      }
+    }
+    throw new Error('No uncovered canvas area is available for camera dragging.');
+  });
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + dx, start.y + dy, { steps: 12 });
+  await page.mouse.up();
+}
+
+async function expectAnchoredDrag(page: Page, label: Locator) {
+  await expect(label).toHaveAttribute('data-world-x', /-?\d/);
+  await expect(label.locator('.galaxy-label-title')).toBeVisible();
+  let lastScreen: number[] | undefined;
+  // Wait for the entry flight to settle, so it cannot falsely satisfy the drag
+  // assertion. Reduced motion also makes the scene's world anchors stationary.
+  await expect.poll(async () => {
+    const current = (await projectionSnapshot(label)).screen;
+    const delta = lastScreen ? Math.hypot(current[0] - lastScreen[0], current[1] - lastScreen[1]) : Infinity;
+    lastScreen = current;
+    return delta;
+  }, { intervals: [150, 200, 250] }).toBeLessThan(0.25);
+  const before = await projectionSnapshot(label);
+  await dragUncoveredCanvas(page);
+  await expect.poll(async () => {
+    const current = await projectionSnapshot(label);
+    return Math.hypot(current.screen[0] - before.screen[0], current.screen[1] - before.screen[1]);
+  }).toBeGreaterThan(6);
+  await expect.poll(async () => {
+    const current = await projectionSnapshot(label);
+    return Math.hypot(current.text.x - before.text.x, current.text.y - before.text.y);
+  }).toBeGreaterThan(6);
+  const after = await projectionSnapshot(label);
+  expect(after.world).toEqual(before.world);
+  expect(after.world.every(Number.isFinite)).toBe(true);
+  expect(after.screen.every(Number.isFinite)).toBe(true);
+  expect(Math.hypot(after.marker[0] - after.screen[0], after.marker[1] - after.screen[1])).toBeLessThan(2);
+  expect(after.visible).toBe(true);
+  expect(after.fontSize).toBeGreaterThanOrEqual(13);
+  expect(after.horizontal).toBe(true);
+  expect(after.text.width).toBeGreaterThanOrEqual(175);
+  const viewport = page.viewportSize()!;
+  expect(after.text.x).toBeGreaterThanOrEqual(0);
+  expect(after.text.y).toBeGreaterThanOrEqual(0);
+  expect(after.text.x + after.text.width).toBeLessThanOrEqual(viewport.width);
+  expect(after.text.y + after.text.height).toBeLessThanOrEqual(viewport.height);
 }
 
 test('real public discovery groups ten traceable works into topics with multiple orbiting articles', async ({ page, request }) => {
@@ -112,10 +194,14 @@ test('three depths contain distinct content, luminosity contrast, and a central 
   await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(0, 4));
   const hub = (await active(page).locator('.galaxy-hub').boundingBox())!;
   expect(Math.abs(hub.x + hub.width / 2 - 720)).toBeLessThan(90);
-  const cards = await active(page).locator('.galaxy-label').all();
+  const cards = await active(page).locator('.galaxy-label-body').all();
   const bounds = await Promise.all(cards.map(card => card.boundingBox()));
   expect(bounds.some(bound => bound && bound.x + bound.width < hub.x + hub.width / 2)).toBe(true);
   expect(bounds.some(bound => bound && bound.x > hub.x + hub.width / 2)).toBe(true);
+  for (const bound of bounds) {
+    expect(bound).not.toBeNull();
+    expect(bound!.x < hub.x + hub.width && bound!.x + bound!.width > hub.x && bound!.y < hub.y + hub.height && bound!.y + bound!.height > hub.y).toBe(false);
+  }
   await page.screenshot({ path: testInfo.outputPath('depth-2-paragraph-constellation.png'), animations: 'disabled' });
   await active(page).getByRole('button', { name: '下一组星光' }).click();
   await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(4));
@@ -243,7 +329,7 @@ test('a question without answers stays in its orbit and supports reflection', as
   await arrive(page);
   await active(page).getByRole('button', { name: `进入星系：${question.title}` }).click();
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '1');
-  await expect(active(page).locator('.galaxy-hub-meta')).toHaveText('0 个回答');
+  await expect(active(page).locator('.galaxy-hub-meta')).toHaveText('0 个回答 · 棒旋星系');
   await expect(active(page).getByRole('button', { name: /^阅读观点：/ })).toHaveCount(0);
   await page.locator('.galaxy-canvas').dispatchEvent('wheel', { deltaY: -1600 });
   await page.keyboard.press('Enter');
@@ -476,13 +562,32 @@ test('mobile supports three layers, central reading and notes without horizontal
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('mobile-question-clusters.png'), animations: 'disabled' });
   await enterArticle(page);
+  await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(0, 2));
+  await expect(active(page).locator('.galaxy-orbit-pagination > span')).toHaveText('1—2 / 6');
+  const initialPlanets = await active(page).locator('.galaxy-label-paragraph').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-node-id')));
   await page.screenshot({ path: testInfo.outputPath('mobile-paragraph-constellation.png'), animations: 'disabled' });
+  await active(page).getByRole('button', { name: '下一组星光' }).click();
+  await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(2, 4));
+  await expect(active(page).locator('.galaxy-orbit-pagination > span')).toHaveText('3—4 / 6');
+  const nextPlanets = active(page).locator('.galaxy-label-paragraph');
+  await expect(nextPlanets).toHaveCount(2);
+  for (const label of await nextPlanets.all()) {
+    await expect(label.locator('.galaxy-label-title')).toBeVisible();
+    await expect(label).toHaveAttribute('data-planet-kind', /.+/);
+    await expect(label).toHaveAttribute('data-world-x', /-?\d/);
+    expect(initialPlanets).not.toContain(await label.getAttribute('data-node-id'));
+  }
+  await nextPlanets.first().locator('.galaxy-star-marker').click();
+  await expect(nextPlanets.first().locator('.galaxy-star-marker')).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('button', { name: '收藏当前内容', exact: true }).click();
   await expect.poll(async () => (await stored(page, keys.collection)).length).toBe(1);
-  await openReader(page);
+  await page.keyboard.press('f');
   const reader = page.getByRole('dialog', { name: '原文阅览', exact: true });
+  await expect(reader).toBeVisible();
+  await expect(reader.getByRole('button', { name: '选中第 3 段', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await reader.getByRole('button', { name: /写下思考/ }).click();
   const reflection = page.getByRole('dialog', { name: '让这一刻的思考，留下来' });
+  await expect(reflection.locator('blockquote')).toHaveText(paragraphs[2]);
   await reflection.getByRole('textbox', { name: '你的思考' }).fill('在手机上留下的一点思考。');
   await reflection.getByRole('button', { name: '保存思考' }).click();
   await reader.getByRole('button', { name: '关闭原文阅览', exact: true }).click();
@@ -493,4 +598,82 @@ test('mobile supports three layers, central reading and notes without horizontal
   await expect(bag.getByText('在手机上留下的一点思考。')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('mobile-notebook.png'), animations: 'disabled' });
+});
+
+test('answer stars and excerpt planets keep readable labels attached to persistent world anchors while dragging', async ({ page }, testInfo) => {
+  await arrive(page);
+  await enterQuestion(page);
+  const answerLabel = active(page).locator('.galaxy-label').filter({ hasText: answers[0].title });
+  await expectAnchoredDrag(page, answerLabel);
+  await page.screenshot({ path: testInfo.outputPath('answer-star-camera-orbit.png'), animations: 'disabled' });
+  await enterArticle(page);
+  const paragraphLabel = active(page).locator('.galaxy-label-paragraph').first();
+  await expectAnchoredDrag(page, paragraphLabel);
+  await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(0, 4));
+  await page.screenshot({ path: testInfo.outputPath('paragraph-planet-camera-orbit.png'), animations: 'disabled' });
+});
+
+test('F toggles the source reader, V controls flight, and editor/modifier/repeat events do not trigger reading', async ({ page }) => {
+  await arrive(page);
+  await page.keyboard.press('f');
+  await expect(page.getByRole('dialog', { name: '原文阅览', exact: true })).toHaveCount(0);
+  await expect(page.locator('.galaxy-flight-hud')).toHaveCount(0);
+  await enterQuestion(page);
+  await page.keyboard.press('f');
+  await expect(page.getByRole('dialog', { name: '原文阅览', exact: true })).toHaveCount(0);
+  await enterArticle(page);
+  await page.evaluate(() => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', repeat: true, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', altKey: true, bubbles: true }));
+  });
+  await expect(page.getByRole('dialog', { name: '原文阅览', exact: true })).toHaveCount(0);
+  await page.keyboard.press('f');
+  const reader = page.getByRole('dialog', { name: '原文阅览', exact: true });
+  await expect(reader).toBeVisible();
+  await expect(reader.getByRole('heading', { level: 1 })).toHaveText(answers[0].title);
+  await page.keyboard.press('f');
+  await expect(reader).toBeHidden();
+  await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '2');
+  await page.keyboard.press('v');
+  await expect(page.locator('.galaxy-flight-hud')).toBeVisible();
+  await page.keyboard.press('v');
+  await expect(page.locator('.galaxy-flight-hud')).toHaveCount(0);
+  await page.keyboard.press('/');
+  const search = page.getByRole('textbox', { name: '探索问题或话题' });
+  await search.pressSequentially('fv');
+  await expect(search).toHaveValue('fv');
+  await expect(reader).toBeHidden();
+  await expect(page.locator('.galaxy-flight-hud')).toHaveCount(0);
+  await openBag(page);
+  await page.keyboard.press('f');
+  await expect(page.getByRole('dialog', { name: '知识行囊', exact: true })).toBeVisible();
+  await expect(reader).toBeHidden();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('r');
+  const reflection = page.getByRole('dialog', { name: '让这一刻的思考，留下来' });
+  await reflection.getByRole('textbox', { name: '你的思考' }).pressSequentially('fv');
+  await expect(reflection).toBeVisible();
+  await expect(reader).toBeHidden();
+});
+
+test('overview galaxy shapes and the four excerpt planets expose distinct celestial identities', async ({ page }, testInfo) => {
+  const questions = Array.from({ length: 5 }, (_, index) => index === 0 ? question : ({
+    ...question, id: `morphology-question-${index}`, title: `用第 ${index + 1} 个问题观察星系形态`,
+  }));
+  await page.route('**/api/explore?**', route => fulfill(route, { ...discovery(), questions }));
+  await arrive(page);
+  await expect(active(page).locator('.galaxy-label[data-morphology]')).toHaveCount(5);
+  const morphologies = await active(page).locator('.galaxy-label').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-morphology')));
+  expect(new Set(morphologies).size).toBe(5);
+  expect(morphologies.every(Boolean)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('five-galaxy-morphologies.png'), animations: 'disabled' });
+  await enterArticle(page);
+  await expect(active(page).locator('.galaxy-label[data-planet-kind]')).toHaveCount(4);
+  const planets = await active(page).locator('.galaxy-label-paragraph').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-planet-kind')));
+  expect(new Set(planets).size).toBe(4);
+  expect(planets.every(Boolean)).toBe(true);
+  await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(0, 4));
+  await page.screenshot({ path: testInfo.outputPath('four-distinct-excerpt-planets.png'), animations: 'disabled' });
 });

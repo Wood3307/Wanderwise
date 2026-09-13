@@ -656,9 +656,11 @@ export default function App() {
   }, []);
   useEffect(() => {
     function keyboard(event: KeyboardEvent) {
-      const editing = (event.target as HTMLElement).closest(
-        'input, textarea, select, [contenteditable="true"]',
-      );
+      const editing =
+        event.target instanceof Element &&
+        event.target.closest(
+          'input, textarea, select, [contenteditable="true"]',
+        );
       if (event.key === "Escape") {
         if (reflectionTarget) setReflectionTarget(null);
         else if (drawer) setDrawer(null);
@@ -678,13 +680,20 @@ export default function App() {
         return;
       if (event.key.toLowerCase() === "e") toggleSave();
       if (event.key.toLowerCase() === "r") openReflection();
+      if (event.key.toLowerCase() === "f") {
+        if (!event.repeat && level === 2 && selectedAnswer) {
+          event.preventDefault();
+          setReaderOpen((value) => !value);
+        }
+        return;
+      }
       if (readerOpen) return;
       if (event.key === "/") {
         event.preventDefault();
         searchRef.current?.focus();
       }
       if (event.key === "?") setDrawer("help");
-      if (!readerOpen && event.key.toLowerCase() === "f")
+      if (!readerOpen && !event.repeat && event.key.toLowerCase() === "v")
         setFlightMode((value) => !value);
       if (!readerOpen && event.key === "Enter" && level === 2 && selectedAnswer)
         openReader();
@@ -1108,6 +1117,7 @@ export default function App() {
                 <button aria-label="打开原文阅览" onClick={() => openReader()}>
                   <BookOpen size={15} />
                   <span>原文</span>
+                  <kbd>F</kbd>
                 </button>
               </>
             )}
@@ -1115,7 +1125,7 @@ export default function App() {
         )}
         <div className="scene-tools">
           <IconButton
-            label={flightMode ? "退出自由飞行 (F)" : "自由飞行 (F)"}
+            label={flightMode ? "退出自由飞行 (V)" : "自由飞行 (V)"}
             active={flightMode}
             onClick={() => setFlightMode((value) => !value)}
           >
@@ -1386,8 +1396,10 @@ export default function App() {
                 {[
                   ["滚轮 / 双指缩放", "调整探索纵深"],
                   ["拖动鼠标 / 单指滑动", "转动视角"],
+                  ["Shift + 拖动 / 右键拖动", "平移视角"],
                   ["点击 / 双击星体", "选择 / 进入内容"],
-                  ["F · W A S D", "切换飞行 · 移动"],
+                  ["F", "打开 / 收起原文"],
+                  ["V · W A S D", "切换飞行 · 移动"],
                   ["E / R", "收藏 / 留下思考"],
                   ["Esc / /", "返回上一层 / 搜索"],
                 ].map(([key, value]) => (

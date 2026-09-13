@@ -1,9 +1,27 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import * as THREE from 'three';
-import type { Answer, Highlight, Question } from '../types';
-import './galaxy.css';
-import StellarText from './StellarText';
-import CosmicBackdrop from './CosmicBackdrop';
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import type { Answer, Highlight, Question } from "../types";
+import StellarText from "./StellarText";
+import CosmicBackdrop from "./CosmicBackdrop";
+import {
+  answerLocalPosition,
+  createGalaxy,
+  getGalaxySpec,
+  type GalaxySpec,
+} from "./space/galaxies";
+import {
+  createPlanetarySystem,
+  getPlanetKind,
+  planetKindNames,
+  type PlanetarySystem,
+} from "./space/planets";
+import {
+  placeLabels,
+  projectAnchor,
+  type LabelInput,
+  type LabelPlacement,
+} from "./space/projection";
+import "./galaxy.css";
 
 interface GalaxySceneProps {
   questions: Question[];
@@ -22,537 +40,1042 @@ interface GalaxySceneProps {
   onSelectParagraph: (index: number, quote?: string) => void;
   selectedQuote?: string;
 }
-
 interface GalaxyNode {
   question: Question;
+  spec: GalaxySpec;
   position: THREE.Vector3;
   answers: { answer: Answer; position: THREE.Vector3 }[];
 }
-
-type ContentLayer = { id: number; key: string; stage: number; question?: Question; answer?: Answer; questions: Question[]; phase: 'enter' | 'exit' };
-const orbitPositions = (count: number, paragraphs = false): number[][] => {
-  if (count === 1) return paragraphs ? [[22, 40]] : [[22, 52]];
-  if (count === 2) return paragraphs ? [[19, 32], [81, 46]] : [[19, 47], [81, 55]];
-  if (count === 3) return paragraphs ? [[19, 23], [81, 23], [19, 57]] : [[19, 31], [81, 32], [50, 73]];
-  if (count === 4) return paragraphs ? [[19, 22], [81, 22], [19, 57], [81, 57]] : [[19, 27], [81, 27], [19, 63], [81, 63]];
-  if (paragraphs) return [[17, 25], [83, 25], [16, 58], [84, 58], [35, 82], [65, 82]];
-  return [[19, 28], [81, 28], [16, 59], [84, 59], [35, 81], [65, 81]];
+interface ContentLayer {
+  id: number;
+  key: string;
+  stage: number;
+  question?: Question;
+  answer?: Answer;
+  questions: Question[];
+  phase: "enter" | "exit";
+}
+interface BodyAnchor {
+  id: string;
+  key: string;
+  position: THREE.Vector3;
+  radius: number;
+  kind: "question" | "answer" | "paragraph";
+  planetKind?: string;
+  index?: number;
+}
+const clamp = (value: number, min = 0, max = 1) =>
+  Math.min(max, Math.max(min, value));
+const smooth = (value: number) => {
+  const t = clamp(value);
+  return t * t * (3 - 2 * t);
 };
+const relevance = (value: number) => clamp(value > 1 ? value / 100 : value);
+const stageAt = (depth: number) => (depth < 0.65 ? 0 : depth < 1.65 ? 1 : 2);
+
 function meaningfulHighlights(answer: Answer): Highlight[] {
   if (answer.highlights?.length) return answer.highlights;
-  return answer.paragraphs.map((text, paragraphIndex) => ({ id: `${answer.id}:${paragraphIndex}`, text, paragraphIndex })).filter(item => item.text.trim().length > 24).slice(0, 6);
+  return answer.paragraphs
+    .map((text, paragraphIndex) => ({
+      id: `${answer.id}:${paragraphIndex}`,
+      text,
+      paragraphIndex,
+    }))
+    .filter((item) => item.text.trim().length > 24)
+    .slice(0, 6);
 }
-const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
-const smooth = (value: number) => { const t = clamp(value); return t * t * (3 - 2 * t); };
-const relevance = (value: number) => clamp(value > 1 ? value / 100 : value);
-const coordinates = [
-  [-90, 14, 14], [91, 73, -38], [76, -79, -56], [-114, -80, -10],
-  [108, -73, -34], [-179, 14, -102], [-12, -97, -65], [180, -5, -122],
-  [18, 108, -115], [-172, 105, -132], [184, 117, -155], [-160, -127, -150],
-];
-
 function seededRandom(seed: string) {
-  let value = Array.from(seed).reduce((sum, char) => Math.imul(sum ^ char.charCodeAt(0), 16777619), 2166136261) >>> 0;
-  return () => { value += 0x6D2B79F5; let t = value; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  let value = 2166136261;
+  for (const char of seed)
+    value = Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0;
+  return () => {
+    value += 0x6d2b79f5;
+    let t = Math.imul(value ^ (value >>> 15), value | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
-
 function makeLayout(questions: Question[]): GalaxyNode[] {
   return questions.map((question, index) => {
-    const coordinate = coordinates[index % coordinates.length];
-    const spread = 1 + Math.floor(index / coordinates.length) * 0.36;
-    const position = new THREE.Vector3(coordinate[0] * spread, coordinate[1] * spread, coordinate[2] - Math.floor(index / coordinates.length) * 50);
+    const spec = getGalaxySpec(question.id, index);
+    let position: THREE.Vector3;
+    if (questions.length <= 3)
+      position = new THREE.Vector3(
+        ...([
+          [-100, 12, 6],
+          [94, 83, -42],
+          [74, -97, -25],
+        ][index] as [number, number, number]),
+      );
+    else {
+      const angle = index * 2.399963 + 2.8;
+      const radius = 58 + Math.sqrt(index) * 85;
+      position = new THREE.Vector3(
+        Math.cos(angle) * radius,
+        Math.sin(angle) * radius * 0.67,
+        -18 - (index % 3) * 28,
+      );
+    }
     return {
-      question, position,
-      answers: question.answers.map((answer, answerIndex) => {
-        const angle = answerIndex * 2.399963 + index * 0.4 + 0.65;
-        const radius = 34 + Math.sqrt(answerIndex) * 7;
-        return { answer, position: new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * 0.65, Math.sin(angle * 1.7) * 7).add(position) };
-      }),
+      question,
+      spec,
+      position,
+      answers: question.answers.map((answer, answerIndex) => ({
+        answer,
+        position: answerLocalPosition(
+          spec,
+          answerIndex,
+          question.answers.length,
+        )
+          .applyEuler(spec.rotation)
+          .add(position),
+      })),
     };
   });
 }
-
 function glowTexture() {
-  const canvas = document.createElement('canvas');
+  const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 128;
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext("2d");
   if (context) {
     const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
-    gradient.addColorStop(0, 'rgba(255,255,255,1)');
-    gradient.addColorStop(0.035, 'rgba(255,255,255,.98)');
-    gradient.addColorStop(0.1, 'rgba(225,241,255,.65)');
-    gradient.addColorStop(0.24, 'rgba(181,213,255,.17)');
-    gradient.addColorStop(0.6, 'rgba(140,190,255,.035)');
-    gradient.addColorStop(1, 'rgba(140,190,255,0)');
+    gradient.addColorStop(0, "#ffffff");
+    gradient.addColorStop(0.035, "#fffff3f5");
+    gradient.addColorStop(0.12, "#cee8ff8c");
+    gradient.addColorStop(0.32, "#83bde523");
+    gradient.addColorStop(1, "#83bde500");
     context.fillStyle = gradient;
     context.fillRect(0, 0, 128, 128);
   }
   return new THREE.CanvasTexture(canvas);
 }
-
-function pointMaterial(pixelRatio: number, opacity = 1) {
-  return new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    uniforms: { uOpacity: { value: opacity }, uPixelRatio: { value: pixelRatio }, uTime: { value: 0 } },
-    vertexShader: `
-      attribute float size;
-      attribute vec3 color;
-      varying vec3 vColor;
-      uniform float uPixelRatio;
-      uniform float uTime;
-      void main() {
-        vColor = color;
-        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-        float shimmer = 0.93 + 0.07 * sin(uTime * 0.45 + position.x * 2.0);
-        gl_PointSize = clamp(size * (550.0 / max(8.0, -mvPosition.z)) * uPixelRatio * shimmer, 0.65, 25.0 * uPixelRatio);
-        gl_Position = projectionMatrix * mvPosition;
-      }
-    `,
-    fragmentShader: `
-      varying vec3 vColor;
-      uniform float uOpacity;
-      void main() {
-        float radius = length(gl_PointCoord - vec2(0.5));
-        if (radius > 0.5) discard;
-        float core = exp(-radius * radius * 48.0);
-        float halo = exp(-radius * radius * 13.0) * 0.26;
-        gl_FragColor = vec4(vColor, (core + halo) * uOpacity);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `,
-  });
-}
-
-function createParticles(positions: number[], colors: number[], sizes: number[], material: THREE.ShaderMaterial) {
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
-  return new THREE.Points(geometry, material);
-}
-
-function createCloud(random: () => number, count: number, radius: number, color: THREE.Color, brightness: number, pixelRatio: number) {
-  const positions: number[] = [], colors: number[] = [], sizes: number[] = [];
-  const white = new THREE.Color('#dceafa');
-  for (let index = 0; index < count; index++) {
-    const r = Math.pow(random(), 0.68) * radius;
-    const arm = Math.floor(random() * 4) * Math.PI / 2;
-    const angle = arm + (r / radius) * 4.8 + (random() - 0.5) * (1.7 - (r / radius) * 0.8);
-    const loose = random() > 0.83 ? 1.7 : 1;
-    positions.push(Math.cos(angle) * r * loose, Math.sin(angle) * r * 0.58 * loose, (random() + random() - 1) * radius * 0.11);
-    const c = color.clone().lerp(white, Math.pow(random(), 2) * 0.75);
-    c.multiplyScalar((0.38 + random() * 0.62) * brightness);
-    colors.push(c.r, c.g, c.b);
-    const size = random();
-    sizes.push(size > 0.986 ? 2.6 + random() * 1.9 : size > 0.87 ? 1.1 + random() * 0.8 : 0.35 + random() * 0.9);
-  }
-  return createParticles(positions, colors, sizes, pointMaterial(pixelRatio));
-}
-
-const isTyping = (target: EventTarget | null) => target instanceof HTMLElement && (!!target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]'));
+const isTyping = (target: EventTarget | null) =>
+  target instanceof HTMLElement &&
+  !!target.closest(
+    'input,textarea,select,[contenteditable="true"],[role="dialog"]',
+  );
 
 export default function GalaxyScene(props: GalaxySceneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelsRef = useRef(new Map<string, HTMLDivElement>());
+  const hubRef = useRef<HTMLDivElement | null>(null);
+  const coreRef = useRef<HTMLButtonElement | null>(null);
   const propsRef = useRef(props);
   propsRef.current = props;
   const [webglAvailable, setWebglAvailable] = useState(true);
   const [dragging, setDragging] = useState(false);
-  const layoutSignature = props.questions.map(question => `${question.id}:${question.answers.map(answer => answer.id).join(',')}`).join('|');
-  const layout = useMemo(() => makeLayout(props.questions), [layoutSignature]);
-  const cameraMemory = useRef<{ position: THREE.Vector3; target: THREE.Vector3; yaw: number; pitch: number } | null>(null);
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(() => (innerWidth < 760 ? 2 : 4));
+  const pageSizeRef = useRef(pageSize);
+  pageSizeRef.current = pageSize;
+  useEffect(() => {
+    const media = matchMedia("(max-width: 759px)");
+    const change = () => {
+      setPageSize(media.matches ? 2 : 4);
+      setPage(0);
+    };
+    media.addEventListener("change", change);
+    return () => media.removeEventListener("change", change);
+  }, []);
   const pageRef = useRef(page);
   pageRef.current = page;
-  const selectedQuestion = props.questions.find(question => question.id === props.selectedQuestionId) ?? props.questions[0];
-  const selectedAnswer = selectedQuestion?.answers.find(answer => answer.id === props.selectedAnswerId) ?? selectedQuestion?.answers[0];
-  const stage = props.depth < 0.65 ? 0 : props.depth < 1.65 ? 1 : 2;
-  const layerKey = `${stage}:${stage ? selectedQuestion?.id : props.questions.map(question => question.id).join(',')}:${stage === 2 ? selectedAnswer?.id : ''}`;
-  const activeItemCount = stage === 1 ? selectedQuestion?.answers.length ?? 0 : stage === 2 && selectedAnswer ? meaningfulHighlights(selectedAnswer).length : props.questions.length;
-  useEffect(() => { setPage(previous => Math.min(previous, Math.max(0, Math.ceil(activeItemCount / 4) - 1))); }, [activeItemCount]);
-
-  const layerSerial = useRef(1);
-  const [layers, setLayers] = useState<ContentLayer[]>([{ id: 0, key: layerKey, stage, question: selectedQuestion, answer: selectedAnswer, questions: props.questions, phase: 'enter' }]);
+  const stage = stageAt(props.depth);
+  const selectedQuestion =
+    props.questions.find(
+      (question) => question.id === props.selectedQuestionId,
+    ) ?? props.questions[0];
+  const selectedAnswer =
+    selectedQuestion?.answers.find(
+      (answer) => answer.id === props.selectedAnswerId,
+    ) ?? selectedQuestion?.answers[0];
+  const layoutSignature = props.questions
+    .map(
+      (question) =>
+        `${question.id}:${question.answers.map((answer) => answer.id).join(",")}`,
+    )
+    .join("|");
+  const layout = useMemo(() => makeLayout(props.questions), [layoutSignature]);
+  const cameraMemory = useRef<{
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    yaw: number;
+    pitch: number;
+    pan: THREE.Vector3;
+  } | null>(null);
+  const layerKey = `${stage}:${stage ? selectedQuestion?.id : props.questions.map((question) => question.id).join(",")}:${stage === 2 ? selectedAnswer?.id : ""}`;
+  const count =
+    stage === 1
+      ? (selectedQuestion?.answers.length ?? 0)
+      : stage === 2 && selectedAnswer
+        ? meaningfulHighlights(selectedAnswer).length
+        : props.questions.length;
+  const serial = useRef(1);
+  const [layers, setLayers] = useState<ContentLayer[]>([
+    {
+      id: 0,
+      key: layerKey,
+      stage,
+      question: selectedQuestion,
+      answer: selectedAnswer,
+      questions: props.questions,
+      phase: "enter",
+    },
+  ]);
+  useEffect(() => {
+    setPage((previous) =>
+      Math.min(
+        previous,
+        Math.max(0, Math.ceil(count / pageSizeRef.current) - 1),
+      ),
+    );
+  }, [count, pageSize]);
   useEffect(() => {
     setPage(0);
-    setLayers(previous => {
-      if (previous.some(layer => layer.key === layerKey && layer.phase === 'enter')) return previous;
-      return [...previous.filter(layer => layer.phase !== 'exit').map(layer => ({ ...layer, phase: 'exit' as const })), { id: layerSerial.current++, key: layerKey, stage, question: selectedQuestion, answer: selectedAnswer, questions: props.questions, phase: 'enter' }];
-    });
-    const timer = setTimeout(() => setLayers(previous => previous.filter(layer => layer.phase !== 'exit')), props.reducedMotion ? 0 : 730);
+    setLayers((previous) =>
+      previous.some(
+        (layer) => layer.key === layerKey && layer.phase === "enter",
+      )
+        ? previous
+        : [
+            ...previous
+              .filter((layer) => layer.phase !== "exit")
+              .map((layer) => ({ ...layer, phase: "exit" as const })),
+            {
+              id: serial.current++,
+              key: layerKey,
+              stage,
+              question: selectedQuestion,
+              answer: selectedAnswer,
+              questions: props.questions,
+              phase: "enter",
+            },
+          ],
+    );
+    const timer = setTimeout(
+      () =>
+        setLayers((previous) =>
+          previous.filter((layer) => layer.phase !== "exit"),
+        ),
+      props.reducedMotion ? 0 : 730,
+    );
     return () => clearTimeout(timer);
   }, [layerKey, props.reducedMotion]);
 
-
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
+    const canvas = canvasRef.current,
+      container = containerRef.current;
     if (!canvas || !container || !layout.length) return;
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true, powerPreference: 'high-performance' });
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        alpha: true,
+        antialias: true,
+        powerPreference: "high-performance",
+      });
     } catch {
       setWebglAvailable(false);
       return;
     }
     setWebglAvailable(true);
-    const isMobile = container.clientWidth < 760;
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 1.75);
+    let width = container.clientWidth,
+      height = container.clientHeight;
+    const mobile = width < 760;
+    const pixelRatio = Math.min(devicePixelRatio || 1, mobile ? 1.35 : 1.65);
     renderer.setPixelRatio(pixelRatio);
-    renderer.setClearColor('#060b12', 0);
+    renderer.setClearColor("#060b12", 0);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(48, 1, 0.5, 2600);
+    const camera = new THREE.PerspectiveCamera(48, width / height, 0.06, 4000);
     const texture = glowTexture();
-    const sceneMaterials: THREE.ShaderMaterial[] = [];
-    const cloudMaterials = new Map<string, THREE.ShaderMaterial>();
-    const answerMaterials = new Map<string, THREE.ShaderMaterial>();
-    const answerSprites = new Map<string, THREE.Sprite>();
-    const answerClouds = new Map<string, THREE.Object3D>();
-    const questionSprites = new Map<string, THREE.Sprite>();
-    const cloudGroups: THREE.Group[] = [];
-    let width = container.clientWidth, height = container.clientHeight;
-    let destroyed = false, contextLost = false, hidden = document.hidden, frame = 0, elapsed = 0, lastTime = 0;
-    let userYaw = cameraMemory.current?.yaw ?? -0.055, userPitch = cameraMemory.current?.pitch ?? 0.04, yaw = userYaw, pitch = userPitch;
-    let previousReset = propsRef.current.resetToken;
-    let previousQuestion = propsRef.current.selectedQuestionId;
-    const flightOffset = new THREE.Vector3();
-    const target = cameraMemory.current?.target.clone() ?? new THREE.Vector3(12, 0, 0);
-    const desiredTarget = new THREE.Vector3();
-    const desiredPosition = new THREE.Vector3();
-    const projected = new THREE.Vector3();
-    const currentPosition = cameraMemory.current?.position.clone() ?? new THREE.Vector3(12, 15, 335);
+    const galaxyModels = new Map<string, ReturnType<typeof createGalaxy>>();
+    const answerStars = new Map<
+      string,
+      { group: THREE.Group; core: THREE.Mesh; glow: THREE.Sprite }
+    >();
+    let system: PlanetarySystem | null = null,
+      systemKey = "";
+    let frame = 0,
+      destroyed = false,
+      contextLost = false,
+      hidden = document.hidden,
+      elapsed = 0,
+      lastTime = 0;
+    let widthCache = -1,
+      modelRadius = 150,
+      projectionTick = 0,
+      lastLabelScope = "";
+    let yawTarget = cameraMemory.current?.yaw ?? -0.06,
+      pitchTarget = cameraMemory.current?.pitch ?? 0.16;
+    let yaw = yawTarget,
+      pitch = pitchTarget;
+    const pan = cameraMemory.current?.pan.clone() ?? new THREE.Vector3();
+    const target = cameraMemory.current?.target.clone() ?? new THREE.Vector3();
+    const currentPosition =
+      cameraMemory.current?.position.clone() ?? new THREE.Vector3(0, 18, 380);
+    const desiredTarget = new THREE.Vector3(),
+      desiredPosition = new THREE.Vector3(),
+      anchorWorld = new THREE.Vector3();
+    let previousReset = propsRef.current.resetToken,
+      previousQuestion = propsRef.current.selectedQuestionId,
+      previousAnswer = propsRef.current.selectedAnswerId,
+      previousStage = stageAt(propsRef.current.depth);
     const keys = new Set<string>();
     const pointers = new Map<number, { x: number; y: number }>();
-    let pointerStart = { x: 0, y: 0 }, moved = false, pinchDistance = 0;
-
-    const backgroundRandom = seededRandom('wanderwise-observable-universe');
-    const backgroundPositions: number[] = [], backgroundColors: number[] = [], backgroundSizes: number[] = [];
-    const backgroundPalette = ['#7da5bc', '#7b8ea8', '#d9d5be', '#567897', '#94bbbf'];
-    for (let i = 0; i < (isMobile ? 2100 : 5400); i++) {
-      backgroundPositions.push((backgroundRandom() - 0.5) * 1450, (backgroundRandom() - 0.5) * 950, -180 - backgroundRandom() * 1100);
-      const color = new THREE.Color(backgroundPalette[Math.floor(backgroundRandom() * backgroundPalette.length)]).multiplyScalar(0.25 + backgroundRandom() * 0.55);
-      backgroundColors.push(color.r, color.g, color.b);
-      backgroundSizes.push(backgroundRandom() > 0.995 ? 2.8 : 0.3 + backgroundRandom() * 1.7);
+    let pointerStart = { x: 0, y: 0 },
+      moved = false,
+      panning = false,
+      pinchDistance = 0;
+    let lastPlacements = new Map<string, LabelPlacement>();
+    const bodySizes = new Map<string, { width: number; height: number }>();
+    let currentBodies: BodyAnchor[] = [];
+    const random = seededRandom("wanderwise-deep-space-v4");
+    const backgroundPositions: number[] = [],
+      backgroundColors: number[] = [];
+    for (let i = 0; i < (mobile ? 1700 : 3800); i++) {
+      const direction = new THREE.Vector3(
+        random() - 0.5,
+        random() - 0.5,
+        random() - 0.5,
+      )
+        .normalize()
+        .multiplyScalar(800 + random() * 1000);
+      backgroundPositions.push(direction.x, direction.y, direction.z);
+      const c = new THREE.Color(
+        ["#a5bed5", "#6c91b2", "#d6c8ae"][i % 3],
+      ).multiplyScalar(0.3 + random() * 0.45);
+      backgroundColors.push(c.r, c.g, c.b);
     }
-    const background = createParticles(backgroundPositions, backgroundColors, backgroundSizes, pointMaterial(pixelRatio, 0.75));
-    sceneMaterials.push(background.material);
-    scene.add(background);
+    const skyGeometry = new THREE.BufferGeometry();
+    skyGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(backgroundPositions, 3),
+    );
+    skyGeometry.setAttribute(
+      "color",
+      new THREE.Float32BufferAttribute(backgroundColors, 3),
+    );
+    const sky = new THREE.Points(
+      skyGeometry,
+      new THREE.PointsMaterial({
+        size: 2.7,
+        map: texture,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        vertexColors: true,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    scene.add(sky);
 
-    layout.forEach((node, index) => {
-      const random = seededRandom(node.question.id);
-      const r = relevance(node.question.relevance);
-      const color = new THREE.Color(node.question.color || ['#9fa8ec', '#79bfc6', '#d4bba0'][index % 3]);
-      const group = new THREE.Group();
-      group.position.copy(node.position);
-      group.rotation.z = index * 0.58 + 0.22;
-      group.rotation.x = (index % 3 - 1) * 0.18;
-      const dust = createCloud(random, Math.floor((isMobile ? 1050 : 2350) * (0.55 + r * 0.65)), 28 + r * 22, color, 0.10 + Math.pow(r, 4.1) * 2.5, pixelRatio);
-      group.add(dust);
-      sceneMaterials.push(dust.material);
-      cloudMaterials.set(node.question.id, dust.material);
-      scene.add(group);
-      cloudGroups.push(group);
-      const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, color, transparent: true, opacity: Math.min(1, 0.07 + Math.pow(r, 4) * 1.4), blending: THREE.AdditiveBlending, depthWrite: false }));
-      halo.position.copy(node.position);
-      halo.scale.setScalar(22 + Math.pow(r, 3) * 70);
-      questionSprites.set(node.question.id, halo);
-      scene.add(halo);
-      node.answers.forEach(({ answer, position }, answerIndex) => {
-        const answerColor = color.clone().lerp(new THREE.Color('#eef2e5'), 0.26 + answerIndex % 3 * 0.12);
-        const star = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, color: answerColor, transparent: true, opacity: 0.46, blending: THREE.AdditiveBlending, depthWrite: false }));
-        star.position.copy(position);
-        star.scale.setScalar(9 + relevance(answer.relevance) * 8);
-        scene.add(star);
-        answerSprites.set(answer.id, star);
-        const cloud = createCloud(random, isMobile ? 110 : 280, 4.5 + random() * 2.8, answerColor, 0.3 + relevance(answer.relevance) * 0.7, pixelRatio);
-        cloud.position.copy(position);
-        cloud.rotation.z = answerIndex * 1.3;
-        scene.add(cloud);
-        answerMaterials.set(answer.id, cloud.material);
-        answerClouds.set(answer.id, cloud);
-        sceneMaterials.push(cloud.material);
+    layout.forEach((node) => {
+      const model = createGalaxy(node.spec, {
+        seed: node.question.id,
+        color: node.question.color,
+        relevance: relevance(node.question.relevance),
+        mobile,
+        pixelRatio,
+      });
+      model.group.position.copy(node.position);
+      model.group.rotation.copy(node.spec.rotation);
+      scene.add(model.group);
+      galaxyModels.set(node.question.id, model);
+      node.answers.forEach(({ answer, position }) => {
+        const color = new THREE.Color(node.question.color).lerp(
+          new THREE.Color("#ffe8bc"),
+          0.34,
+        );
+        const group = new THREE.Group();
+        group.position.copy(position);
+        const core = new THREE.Mesh(
+          new THREE.SphereGeometry(
+            0.34 + relevance(answer.relevance) * 0.19,
+            16,
+            12,
+          ),
+          new THREE.MeshBasicMaterial({ color: "#fff2d8", transparent: true }),
+        );
+        const glow = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: texture,
+            color,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          }),
+        );
+        glow.scale.setScalar(7 + relevance(answer.relevance) * 5);
+        group.add(core, glow);
+        scene.add(group);
+        answerStars.set(answer.id, { group, core, glow });
       });
     });
-
-    const connections = new THREE.Group();
-    const curves: THREE.QuadraticBezierCurve3[] = [];
-    const lineMaterial = new THREE.LineBasicMaterial({ color: '#7897a3', transparent: true, opacity: 0.085, blending: THREE.AdditiveBlending, depthWrite: false });
-    for (let i = 1; i < layout.length; i++) {
-      const start = layout[Math.max(0, Math.floor((i - 1) / 2))].position;
-      const end = layout[i].position;
-      const middle = start.clone().lerp(end, 0.5).add(new THREE.Vector3(0, 13 + i * 2, -12));
-      const curve = new THREE.QuadraticBezierCurve3(start, middle, end);
-      curves.push(curve);
-      connections.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(48)), lineMaterial));
+    const network = new THREE.Group();
+    const networkMaterial = new THREE.LineBasicMaterial({
+      color: "#8ba8b9",
+      transparent: true,
+      opacity: 0.12,
+      depthWrite: false,
+    });
+    layout.slice(1).forEach((node, index) => {
+      const start = layout[Math.floor(index / 2)].position;
+      const curve = new THREE.QuadraticBezierCurve3(
+        start,
+        start
+          .clone()
+          .lerp(node.position, 0.5)
+          .add(new THREE.Vector3(0, 18, -20)),
+        node.position,
+      );
+      network.add(
+        new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(curve.getPoints(35)),
+          networkMaterial,
+        ),
+      );
+    });
+    scene.add(network);
+    const trailGeometry = new THREE.BufferGeometry();
+    const trailPoints: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const a = random() * Math.PI * 2,
+        r = 8 + random() * 19;
+      trailPoints.push(
+        Math.cos(a) * r,
+        Math.sin(a) * r,
+        -45,
+        Math.cos(a) * r * 1.2,
+        Math.sin(a) * r * 1.2,
+        -12,
+      );
     }
-    scene.add(connections);
-    const botPositions = new Float32Array(Math.max(1, curves.length) * 3);
-    const botGeometry = new THREE.BufferGeometry();
-    botGeometry.setAttribute('position', new THREE.BufferAttribute(botPositions, 3));
-    const botMaterial = new THREE.PointsMaterial({ size: 1, color: '#d6e7db', map: texture, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false });
-    const bots = new THREE.Points(botGeometry, botMaterial);
-    scene.add(bots);
-
-    const orbitGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 129 }, (_, i) => new THREE.Vector3(Math.cos(i / 128 * Math.PI * 2), Math.sin(i / 128 * Math.PI * 2) * 0.6, 0)));
-    const orbitMaterial = new THREE.LineDashedMaterial({ color: '#d4c9a7', transparent: true, opacity: 0.24, dashSize: 0.025, gapSize: 0.055, depthWrite: false });
-    const selectionOrbit = new THREE.Line(orbitGeometry, orbitMaterial);
-    selectionOrbit.computeLineDistances();
-    scene.add(selectionOrbit);
-
-    const trailPositions = new Float32Array(28 * 6);
-    for (let i = 0; i < 28; i++) {
-      const angle = backgroundRandom() * Math.PI * 2;
-      const distance = 7 + backgroundRandom() * 25;
-      trailPositions.set([Math.cos(angle) * distance, Math.sin(angle) * distance, -24 - backgroundRandom() * 45, Math.cos(angle) * distance * 1.22, Math.sin(angle) * distance * 1.22, -8 - backgroundRandom() * 10], i * 6);
-    }
-    const trails = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(trailPositions, 3)), new THREE.LineBasicMaterial({ color: '#b8d6e2', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
+    trailGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(trailPoints, 3),
+    );
+    const trails = new THREE.LineSegments(
+      trailGeometry,
+      new THREE.LineBasicMaterial({
+        color: "#b0d9eb",
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
     camera.add(trails);
     scene.add(camera);
-
     const resize = () => {
-      width = Math.max(1, container.clientWidth); height = Math.max(1, container.clientHeight);
+      width = Math.max(1, container.clientWidth);
+      height = Math.max(1, container.clientHeight);
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      bodySizes.clear();
+      lastPlacements.clear();
+      widthCache = width;
     };
-    const resizeObserver = new ResizeObserver(resize);
-    resizeObserver.observe(container);
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
     resize();
-
-    const focusNodes = () => {
+    const focus = () => {
       const latest = propsRef.current;
-      const questionNode = layout.find(node => node.question.id === latest.selectedQuestionId) ?? layout[0];
-      const answerNode = questionNode?.answers.find(node => node.answer.id === latest.selectedAnswerId) ?? questionNode?.answers[0];
-      return { questionNode, answerNode };
+      const q =
+        layout.find((node) => node.question.id === latest.selectedQuestionId) ??
+        layout[0];
+      const source =
+        latest.questions.find((question) => question.id === q.question.id) ??
+        q.question;
+      const a =
+        q.answers.find((node) => node.answer.id === latest.selectedAnswerId) ??
+        q.answers[0];
+      const answer =
+        source.answers.find((item) => item.id === a?.answer.id) ??
+        source.answers[0];
+      return { q, a, source, answer };
     };
-
-    const updateLabels = (depth: number) => {
-      if (depth >= 0.65 || width < 760) return;
-      const occupied: { x: number; y: number; w: number; h: number }[] = [];
-      const ordered = [...layout].sort((a, b) => Number(b.question.id === propsRef.current.selectedQuestionId) - Number(a.question.id === propsRef.current.selectedQuestionId));
-      ordered.forEach(node => {
-        const element = labelsRef.current.get(`q:${node.question.id}`);
-        if (!element) return;
-        projected.copy(node.position).project(camera);
-        const x = clamp((projected.x * .5 + .5) * width, 35, width - 35);
-        const y = clamp((-projected.y * .5 + .5) * height, 140, height - 110);
-        element.style.left = `${x}px`;
-        element.style.top = `${y}px`;
-        element.style.visibility = projected.z < 1 ? 'visible' : 'hidden';
-        const body = element.querySelector<HTMLElement>('.galaxy-label-body');
-        if (!body) return;
-        const bodyHeight = 176;
-        const candidates = [[24, 17], [-258, 17], [24, -bodyHeight - 15], [-258, -bodyHeight - 15], [24, 67], [-258, -bodyHeight - 60]];
-        let placement: { x: number; y: number; w: number; h: number } | undefined;
-        for (const [dx, dy] of candidates) {
-          const box = { x: x + dx, y: y + dy, w: 234, h: bodyHeight };
-          if (box.x < 26 || box.x + box.w > width - 26 || box.y < 125 || box.y + box.h > height - 94) continue;
-          if (occupied.some(other => box.x < other.x + other.w + 10 && box.x + box.w + 10 > other.x && box.y < other.y + other.h + 10 && box.y + box.h + 10 > other.y)) continue;
-          placement = box; break;
+    const syncPlanets = (depth: number) => {
+      const { q, a, answer } = focus();
+      if (!answer || !a || depth < 1.08) {
+        if (system) system.group.visible = false;
+        return;
+      }
+      const highlights = meaningfulHighlights(answer);
+      const nextKey = `${answer.id}:${highlights.map((item) => item.id).join(",")}`;
+      if (nextKey !== systemKey) {
+        if (system) {
+          scene.remove(system.group);
+          system.dispose();
         }
-        if (!placement) placement = { x: clamp(x + 24, 26, width - 260), y: clamp(y + 17, 125, height - bodyHeight - 94), w: 234, h: bodyHeight };
-        occupied.push(placement);
-        body.style.left = `${placement.x - x}px`; body.style.top = `${placement.y - y}px`;
-      });
+        system = createPlanetarySystem({
+          seed: answer.id,
+          count: highlights.length,
+          mobile,
+        });
+        systemKey = nextKey;
+        scene.add(system.group);
+      }
+      system!.group.visible = true;
+      system!.group.position.copy(a.position);
+      system!.group.rotation.set(
+        q.spec.rotation.x * 0.18,
+        q.spec.rotation.y * 0.18,
+        q.spec.rotation.z * 0.12,
+      );
     };
-
+    const bodies = (level: number): BodyAnchor[] => {
+      const { q, a, answer } = focus();
+      if (!level)
+        return layout.map((node) => ({
+          id: node.question.id,
+          key: `q:${node.question.id}`,
+          position: node.position,
+          radius: 6,
+          kind: "question",
+        }));
+      if (level === 1)
+        return q.answers.map((node) => ({
+          id: node.answer.id,
+          key: `a:${node.answer.id}`,
+          position: node.position,
+          radius: 0.9,
+          kind: "answer",
+          index: q.answers.indexOf(node),
+        }));
+      if (!system || !a || !answer) return [];
+      const highlights = meaningfulHighlights(answer);
+      system.group.updateWorldMatrix(true, true);
+      return system.planets.flatMap((planet) =>
+        highlights[planet.index]
+          ? [
+              {
+                id: highlights[planet.index].id,
+                key: `p:${highlights[planet.index].id}`,
+                position: planet.object.getWorldPosition(new THREE.Vector3()),
+                radius: planet.radius,
+                kind: "paragraph" as const,
+                planetKind: planet.kind,
+                index: planet.index,
+              },
+            ]
+          : [],
+      );
+    };
+    const writeProjection = (level: number, dt: number) => {
+      const latest = propsRef.current;
+      const { q, a, answer } = focus();
+      const active = bodies(level);
+      currentBodies = active;
+      const scope = `${level}:${q.question.id}:${answer?.id}:${pageRef.current}:${width}`;
+      if (scope !== lastLabelScope || widthCache !== width) {
+        bodySizes.clear();
+        lastPlacements.clear();
+        lastLabelScope = scope;
+        widthCache = width;
+      }
+      const top = width < 760 ? 128 : 94,
+        bottom = height - (width < 760 ? 124 : 86);
+      const obstacles: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      }[] = [];
+      if (level > 0) {
+        const origin = level === 2 && a ? a.position : q.position;
+        const center = projectAnchor(origin, camera, width, height);
+        const hub = hubRef.current,
+          hit = coreRef.current;
+        if (hub && center.visible) {
+          const hw = hub.offsetWidth,
+            hh = hub.offsetHeight;
+          const hx = clamp(center.x - hw / 2, 10, width - hw - 10);
+          const hy = clamp(
+            center.y + (level === 2 ? 43 : 28),
+            top,
+            Math.max(top, bottom - hh),
+          );
+          hub.style.transform = `translate3d(${hx.toFixed(2)}px,${hy.toFixed(2)}px,0)`;
+          hub.style.visibility = "visible";
+          hub.dataset.screenX = center.x.toFixed(3);
+          hub.dataset.screenY = center.y.toFixed(3);
+          obstacles.push({
+            x: hx - 9,
+            y: hy - 5,
+            width: hw + 18,
+            height: hh + 10,
+          });
+        } else if (hub) hub.style.visibility = "hidden";
+        if (hit) {
+          hit.style.transform = `translate3d(${center.x.toFixed(2)}px,${center.y.toFixed(2)}px,0)`;
+          hit.style.visibility = center.visible ? "visible" : "hidden";
+        }
+      }
+      const pageBodies = level
+        ? active.slice(
+            pageRef.current * pageSizeRef.current,
+            (pageRef.current + 1) * pageSizeRef.current,
+          )
+        : active;
+      const entries: LabelInput[] = [];
+      pageBodies.forEach((node, index) => {
+        const element = labelsRef.current.get(node.key);
+        if (!element) return;
+        const screen = projectAnchor(node.position, camera, width, height);
+        element.dataset.worldX = node.position.x.toFixed(4);
+        element.dataset.worldY = node.position.y.toFixed(4);
+        element.dataset.worldZ = node.position.z.toFixed(4);
+        element.dataset.screenX = screen.x.toFixed(3);
+        element.dataset.screenY = screen.y.toFixed(3);
+        if (node.planetKind) element.dataset.planetKind = node.planetKind;
+        element.style.transform = `translate3d(${screen.x.toFixed(2)}px,${screen.y.toFixed(2)}px,0)`;
+        element.style.visibility = screen.visible ? "visible" : "hidden";
+        const body = element.querySelector<HTMLElement>(".galaxy-label-body");
+        if (!body) return;
+        let size = bodySizes.get(node.key);
+        if (!size || projectionTick % 45 === 0) {
+          size = { width: body.offsetWidth, height: body.offsetHeight };
+          bodySizes.set(node.key, size);
+        }
+        const selected =
+          level === 0
+            ? node.id === latest.selectedQuestionId
+            : level === 1
+              ? node.id === latest.selectedAnswerId
+              : meaningfulHighlights(answer!)[node.index!]?.paragraphIndex ===
+                  latest.selectedParagraph &&
+                (!latest.selectedQuote ||
+                  meaningfulHighlights(answer!)[node.index!]?.text ===
+                    latest.selectedQuote);
+        entries.push({
+          id: node.key,
+          anchor: screen,
+          width: size.width,
+          height: size.height,
+          priority: selected ? 30 : index === 0 ? 20 : 11 - index * 0.1,
+          preferredSide: screen.x < width / 2 ? "left" : "right",
+        });
+      });
+      const placed = placeLabels(
+        entries,
+        {
+          width,
+          height,
+          top,
+          bottom,
+          left: width < 760 ? 12 : 22,
+          right: width - (width < 760 ? 12 : 22),
+        },
+        lastPlacements,
+        obstacles,
+      );
+      const eased = new Map<string, LabelPlacement>();
+      entries.forEach((entry) => {
+        const element = labelsRef.current.get(entry.id)!;
+        const body = element.querySelector<HTMLElement>(".galaxy-label-body")!;
+        const line = element.querySelector<SVGLineElement>(
+          ".galaxy-label-leader line",
+        );
+        const next = placed.get(entry.id);
+        if (!next) return;
+        const previous = lastPlacements.get(entry.id);
+        // Anchor translation is immediate. Only a necessary change of label side is eased.
+        const amount =
+          latest.reducedMotion || !previous || !previous.visible
+            ? 1
+            : 1 - Math.exp(-dt * 14);
+        const x = previous?.visible
+          ? next.anchorX +
+            THREE.MathUtils.lerp(
+              previous.x - previous.anchorX,
+              next.x - next.anchorX,
+              amount,
+            )
+          : next.x;
+        const y = previous?.visible
+          ? next.anchorY +
+            THREE.MathUtils.lerp(
+              previous.y - previous.anchorY,
+              next.y - next.anchorY,
+              amount,
+            )
+          : next.y;
+        body.style.transform = `translate3d(${(x - next.anchorX).toFixed(2)}px,${(y - next.anchorY).toFixed(2)}px,0)`;
+        body.style.visibility = next.visible ? "visible" : "hidden";
+        body.style.opacity = next.visible ? "1" : "0";
+        body.inert = !next.visible;
+        if (line) {
+          const endpointX =
+            clamp(next.anchorX, x, x + entry.width) - next.anchorX;
+          const endpointY =
+            clamp(next.anchorY, y, y + entry.height) - next.anchorY;
+          line.setAttribute("x2", endpointX.toFixed(2));
+          line.setAttribute("y2", endpointY.toFixed(2));
+          line.style.opacity =
+            next.visible && Math.hypot(endpointX, endpointY) > 20 ? ".5" : "0";
+        }
+        eased.set(entry.id, { ...next, x, y });
+      });
+      lastPlacements = eased;
+    };
     const animate = (time: number) => {
       if (destroyed || hidden) return;
       frame = requestAnimationFrame(animate);
       const dt = Math.min((time - (lastTime || time)) / 1000, 0.05);
       lastTime = time;
-      const latest = propsRef.current;
+      const latest = propsRef.current,
+        depth = clamp(latest.depth, 0, 2),
+        level = stageAt(depth);
       if (!latest.reducedMotion) elapsed += dt;
-      const depth = clamp(latest.depth, 0, 2);
-      const { questionNode, answerNode } = focusNodes();
-      if (latest.resetToken !== previousReset || latest.selectedQuestionId !== previousQuestion) {
-        flightOffset.set(0, 0, 0); userYaw = -0.055; userPitch = 0.04;
-        previousReset = latest.resetToken; previousQuestion = latest.selectedQuestionId;
+      const { q, a } = focus();
+      if (
+        latest.resetToken !== previousReset ||
+        latest.selectedQuestionId !== previousQuestion
+      ) {
+        pan.set(0, 0, 0);
+        yawTarget = -0.06;
+        pitchTarget = 0.16;
+        previousReset = latest.resetToken;
+        previousQuestion = latest.selectedQuestionId;
       }
-      const inward = smooth(depth);
-      const articleInward = smooth(depth - 1);
-      desiredTarget.set(12, 0, 0);
-      if (questionNode) desiredTarget.lerp(questionNode.position, inward);
-      if (answerNode) desiredTarget.lerp(answerNode.position, articleInward);
-      let radius = THREE.MathUtils.lerp(335, 104, inward);
-      radius = THREE.MathUtils.lerp(radius, 28, articleInward);
-      if (width < 760) radius *= 1.28;
-      let flightSpeed = 0;
+      if (level !== previousStage) {
+        pan.set(0, 0, 0);
+        previousStage = level;
+      }
+      if (latest.selectedAnswerId !== previousAnswer && level === 2) {
+        pan.set(0, 0, 0);
+        previousAnswer = latest.selectedAnswerId;
+      }
+      const inward = smooth(depth),
+        intimate = smooth(depth - 1);
+      const safeAspect = Math.min(camera.aspect, 1.5);
+      const extent = Math.max(
+        ...layout.map(
+          (node) =>
+            Math.max(
+              Math.abs(node.position.x) / safeAspect,
+              Math.abs(node.position.y),
+            ) + node.spec.radius,
+        ),
+      );
+      const farRadius = Math.max(
+        320,
+        (extent / Math.tan(THREE.MathUtils.degToRad(24))) * 1.1,
+      );
+      const galaxyRadius = 150 * Math.max(1, 0.95 / camera.aspect);
+      const stellarRadius = 38 * Math.max(1, 0.96 / camera.aspect);
+      modelRadius = THREE.MathUtils.lerp(
+        THREE.MathUtils.lerp(farRadius, galaxyRadius, inward),
+        stellarRadius,
+        intimate,
+      );
+      let movement = 0;
       if (latest.flightMode && !document.querySelector('[role="dialog"]')) {
-        const speed = keys.has('shift') ? 2 : 1;
-        if (keys.has('w') || keys.has('arrowup')) { latest.onDepthChange(clamp(depth + dt * 0.32 * speed, 0, 2)); flightSpeed = speed; }
-        if (keys.has('s') || keys.has('arrowdown')) { latest.onDepthChange(clamp(depth - dt * 0.32 * speed, 0, 2)); flightSpeed = -speed; }
-        if (keys.has('a') || keys.has('arrowleft')) flightOffset.x -= dt * 16 * speed;
-        if (keys.has('d') || keys.has('arrowright')) flightOffset.x += dt * 16 * speed;
+        const speed = keys.has("shift") ? 2 : 1;
+        if (keys.has("w") || keys.has("arrowup")) {
+          latest.onDepthChange(clamp(depth + dt * 0.3 * speed, 0, 2));
+          movement = speed;
+        }
+        if (keys.has("s") || keys.has("arrowdown")) {
+          latest.onDepthChange(clamp(depth - dt * 0.3 * speed, 0, 2));
+          movement = speed;
+        }
+        if (keys.has("a") || keys.has("arrowleft"))
+          pan.x -= dt * modelRadius * 0.08 * speed;
+        if (keys.has("d") || keys.has("arrowright"))
+          pan.x += dt * modelRadius * 0.08 * speed;
       }
-      desiredTarget.add(flightOffset);
-      const ease = latest.reducedMotion ? 1 : 1 - Math.exp(-dt * 4.2);
-      yaw = THREE.MathUtils.lerp(yaw, userYaw, ease);
-      pitch = THREE.MathUtils.lerp(pitch, userPitch, ease);
+      desiredTarget.set(0, 0, 0).lerp(q.position, inward);
+      if (a) desiredTarget.lerp(a.position, intimate);
+      desiredTarget.add(pan);
+      const ease = latest.reducedMotion ? 1 : 1 - Math.exp(-dt * 5);
+      yaw = THREE.MathUtils.lerp(yaw, yawTarget, ease);
+      pitch = THREE.MathUtils.lerp(pitch, pitchTarget, ease);
       target.lerp(desiredTarget, ease);
-      desiredPosition.set(Math.sin(yaw) * Math.cos(pitch) * radius, Math.sin(pitch) * radius, Math.cos(yaw) * Math.cos(pitch) * radius).add(target);
+      desiredPosition
+        .set(
+          Math.sin(yaw) * Math.cos(pitch),
+          Math.sin(pitch),
+          Math.cos(yaw) * Math.cos(pitch),
+        )
+        .multiplyScalar(modelRadius)
+        .add(target);
       currentPosition.lerp(desiredPosition, ease);
       camera.position.copy(currentPosition);
       camera.lookAt(target);
       camera.updateMatrixWorld();
-      cameraMemory.current = { position: currentPosition.clone(), target: target.clone(), yaw, pitch };
-      // Keep semantic stars and their readable orbit labels in the same projected positions.
-      if (depth >= .65 && depth < 1.65 && questionNode && width >= 760) {
-        const pageAnswers = questionNode.answers.slice(pageRef.current * 4, pageRef.current * 4 + 4);
-        const screenPositions = orbitPositions(pageAnswers.length);
-        const normal = camera.getWorldDirection(new THREE.Vector3());
-        const distance = camera.position.distanceTo(target);
-        pageAnswers.forEach((node, index) => {
-          const [x, y] = screenPositions[index];
-          const ray = new THREE.Vector3(x / 50 - 1, 1 - y / 50, .5).unproject(camera).sub(camera.position).normalize();
-          node.position.copy(ray.multiplyScalar(distance / Math.max(.1, ray.dot(normal))).add(camera.position));
-          answerSprites.get(node.answer.id)?.position.copy(node.position);
-          answerClouds.get(node.answer.id)?.position.copy(node.position);
-        });
+      cameraMemory.current = {
+        position: currentPosition.clone(),
+        target: target.clone(),
+        yaw,
+        pitch,
+        pan: pan.clone(),
+      };
+      syncPlanets(depth);
+      if (system) {
+        system.setOpacity(smooth((depth - 1.25) / 0.6));
+        system.update(
+          elapsed,
+          latest.reducedMotion,
+          pointers.size > 0 ||
+            !!container.querySelector(
+              ".galaxy-label:hover,.galaxy-label:focus-within",
+            ) ||
+            !!document.querySelector('[role="dialog"]'),
+        );
       }
-
-      cloudGroups.forEach((group, index) => { group.rotation.z = index * 0.58 + 0.22 + Math.sin(elapsed * 0.035 + index) * 0.018; });
-      sceneMaterials.forEach(material => { material.uniforms.uTime.value = elapsed; });
-      layout.forEach(node => {
-        const selected = node === questionNode;
-        const opacity = selected ? (1 - inward * .70) * (1 - articleInward * .94) : 1 - inward * .93;
-        const material = cloudMaterials.get(node.question.id);
-        if (material) material.uniforms.uOpacity.value = opacity;
-        const halo = questionSprites.get(node.question.id);
-        if (halo) halo.material.opacity = Math.min(1, 0.05 + Math.pow(relevance(node.question.relevance), 4.1) * 1.4) * opacity;
+      layout.forEach((node) => {
+        const chosen = node.question.id === q.question.id;
+        const opacity = chosen
+          ? (1 - inward * 0.12) * (1 - intimate * 0.982)
+          : 1 - inward * 0.96;
+        galaxyModels.get(node.question.id)?.setOpacity(opacity);
+        galaxyModels
+          .get(node.question.id)
+          ?.update(elapsed, latest.reducedMotion);
         node.answers.forEach(({ answer }) => {
-          const answerSelected = answer.id === answerNode?.answer.id;
-          const material = answerMaterials.get(answer.id);
-          if (material) material.uniforms.uOpacity.value = selected ? THREE.MathUtils.lerp(0.15, answerSelected ? 0.008 : 0.005, articleInward) : 0.18 * (1 - inward);
-          const sprite = answerSprites.get(answer.id);
-          if (sprite) {
-            sprite.material.opacity = selected ? (0.15 + relevance(answer.relevance) * 0.2 + inward * 0.55) * (1 - articleInward * (answerSelected ? .97 : .94)) : 0.2 * (1 - inward);
-            sprite.scale.setScalar((9 + relevance(answer.relevance) * 8) * (answerSelected ? 1 + articleInward * 0.2 : 1));
-          }
+          const star = answerStars.get(answer.id)!;
+          star.group.visible = depth < 1.68 || answer.id !== a?.answer.id;
+          const opacity = chosen
+            ? (0.48 + inward * 0.52) * (1 - intimate * 0.96)
+            : 0.3 * (1 - inward);
+          (star.core.material as THREE.MeshBasicMaterial).opacity = opacity;
+          star.glow.material.opacity =
+            opacity * (0.4 + relevance(answer.relevance) * 0.6);
         });
       });
-      if (questionNode) {
-        selectionOrbit.position.copy(articleInward > 0.55 && answerNode ? answerNode.position : questionNode.position);
-        selectionOrbit.scale.setScalar(THREE.MathUtils.lerp(43, 5.6, articleInward));
-        selectionOrbit.rotation.z = elapsed * 0.035;
-        orbitMaterial.opacity = 0.13 + articleInward * 0.07;
-      }
-      lineMaterial.opacity = 0.075 * (1 - inward * 0.88);
-      botMaterial.opacity = 0.75 * (1 - inward * 0.92);
-      curves.forEach((curve, index) => curve.getPoint((elapsed * 0.026 + index * 0.29) % 1).toArray(botPositions, index * 3));
-      botGeometry.attributes.position.needsUpdate = true;
-      trails.material.opacity = latest.flightMode && !latest.reducedMotion ? THREE.MathUtils.lerp(trails.material.opacity, Math.abs(flightSpeed) * 0.16, 0.08) : 0;
-      updateLabels(depth);
+      networkMaterial.opacity = 0.11 * (1 - inward);
+      trails.material.opacity =
+        latest.flightMode && !latest.reducedMotion ? movement * 0.08 : 0;
+      writeProjection(level, dt);
+      projectionTick++;
       renderer.render(scene, camera);
     };
-
-    const onVisibility = () => {
-      hidden = document.hidden || contextLost;
-      cancelAnimationFrame(frame);
-      keys.clear();
-      if (!hidden) { lastTime = 0; frame = requestAnimationFrame(animate); }
-    };
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.button !== 0) return;
-      canvas.focus({ preventScroll: true });
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      canvas.setPointerCapture(event.pointerId);
-      pointerStart = { x: event.clientX, y: event.clientY }; moved = false;
-      setDragging(true);
-      if (pointers.size === 2) { const [a, b] = [...pointers.values()]; pinchDistance = Math.hypot(a.x - b.x, a.y - b.y); }
-    };
-    const onPointerMove = (event: PointerEvent) => {
-      const previous = pointers.get(event.pointerId);
-      if (!previous) return;
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5) moved = true;
-      if (pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        const distance = Math.hypot(a.x - b.x, a.y - b.y);
-        propsRef.current.onDepthChange(clamp(propsRef.current.depth + (distance - pinchDistance) * 0.005, 0, 2));
-        pinchDistance = distance;
-      } else {
-        userYaw -= (event.clientX - previous.x) * 0.0033;
-        userPitch = clamp(userPitch + (event.clientY - previous.y) * 0.0025, -0.85, 0.85);
-      }
-    };
-    const findNearest = (clientX: number, clientY: number) => {
+    const nearestBody = (x: number, y: number) => {
       const rect = canvas.getBoundingClientRect();
-      const { questionNode } = focusNodes();
-      const nodes = propsRef.current.depth < 0.65 ? layout.map(node => ({ id: node.question.id, position: node.position })) : (questionNode?.answers ?? []).map(node => ({ id: node.answer.id, position: node.position }));
-      let nearest: string | null = null, minimum = 55;
-      nodes.forEach(node => {
-        projected.copy(node.position).project(camera);
-        const distance = Math.hypot((projected.x * 0.5 + 0.5) * width - (clientX - rect.left), (-projected.y * 0.5 + 0.5) * height - (clientY - rect.top));
-        if (projected.z < 1 && distance < minimum) { minimum = distance; nearest = node.id; }
+      let nearest: BodyAnchor | undefined,
+        score = Infinity;
+      currentBodies.forEach((node) => {
+        const projected = projectAnchor(node.position, camera, width, height);
+        if (!projected.visible) return;
+        const distance = Math.hypot(
+          projected.x - (x - rect.left),
+          projected.y - (y - rect.top),
+        );
+        const radius = Math.max(
+          28,
+          (node.radius * height) /
+            (camera.position.distanceTo(node.position) * 0.89) +
+            10,
+        );
+        if (distance < radius && distance < score) {
+          score = distance;
+          nearest = node;
+        }
       });
       return nearest;
     };
-    const onPointerUp = (event: PointerEvent) => {
-      pointers.delete(event.pointerId);
-      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-      if (!pointers.size) setDragging(false);
-      if (!moved && event.type !== 'pointercancel') {
-        const nearest = findNearest(event.clientX, event.clientY);
-        if (nearest) {
-          if (propsRef.current.depth < 0.65) propsRef.current.onSelectQuestion(nearest);
-          else propsRef.current.onSelectAnswer(nearest);
+    const selectBody = (body: BodyAnchor, enter = false) => {
+      const latest = propsRef.current;
+      if (body.kind === "question") {
+        latest.onSelectQuestion(body.id);
+        if (enter) latest.onDepthChange(1);
+      } else if (body.kind === "answer") {
+        if (body.index !== undefined)
+          setPage(Math.floor(body.index / pageSizeRef.current));
+        latest.onSelectAnswer(body.id);
+        if (enter) latest.onDepthChange(2);
+      } else {
+        const answer = focus().answer;
+        const highlight = answer && meaningfulHighlights(answer)[body.index!];
+        if (highlight) {
+          setPage(Math.floor(body.index! / pageSizeRef.current));
+          latest.onSelectParagraph(highlight.paragraphIndex, highlight.text);
+          if (enter)
+            latest.onOpenReader(highlight.paragraphIndex, highlight.text);
         }
       }
     };
-    const onDoubleClick = (event: MouseEvent) => {
-      const nearest = findNearest(event.clientX, event.clientY);
-      if (!nearest) return;
-      if (propsRef.current.depth < 0.65) { propsRef.current.onSelectQuestion(nearest); propsRef.current.onDepthChange(1); }
-      else { propsRef.current.onSelectAnswer(nearest); propsRef.current.onDepthChange(2); }
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0 && event.button !== 2) return;
+      canvas.focus({ preventScroll: true });
+      canvas.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      pointerStart = { x: event.clientX, y: event.clientY };
+      moved = false;
+      panning = event.shiftKey || event.button === 2;
+      setDragging(true);
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        pinchDistance = Math.hypot(a.x - b.x, a.y - b.y);
+      }
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (isTyping(event.target) || !propsRef.current.flightMode || event.ctrlKey || event.metaKey || event.altKey) return;
+    const move = (event: PointerEvent) => {
+      const previous = pointers.get(event.pointerId);
+      if (!previous) return;
+      const dx = event.clientX - previous.x,
+        dy = event.clientY - previous.y;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (
+        Math.hypot(
+          event.clientX - pointerStart.x,
+          event.clientY - pointerStart.y,
+        ) > 5
+      )
+        moved = true;
+      if (pointers.size > 1) {
+        const [a, b] = [...pointers.values()];
+        const distance = Math.hypot(a.x - b.x, a.y - b.y);
+        propsRef.current.onDepthChange(
+          clamp(
+            propsRef.current.depth + (distance - pinchDistance) * 0.004,
+            0,
+            2,
+          ),
+        );
+        pinchDistance = distance;
+      } else if (panning) {
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(
+            camera.quaternion,
+          ),
+          up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+        pan
+          .addScaledVector(right, ((-dx * modelRadius) / height) * 0.65)
+          .addScaledVector(up, ((dy * modelRadius) / height) * 0.65);
+      } else {
+        yawTarget -= dx * 0.005;
+        pitchTarget = clamp(pitchTarget + dy * 0.0035, -1.25, 1.25);
+      }
+    };
+    const up = (event: PointerEvent) => {
+      pointers.delete(event.pointerId);
+      if (canvas.hasPointerCapture(event.pointerId))
+        canvas.releasePointerCapture(event.pointerId);
+      if (!pointers.size) setDragging(false);
+      if (!moved && event.type !== "pointercancel") {
+        const body = nearestBody(event.clientX, event.clientY);
+        if (body) selectBody(body);
+      }
+    };
+    const double = (event: MouseEvent) => {
+      const body = nearestBody(event.clientX, event.clientY);
+      if (body) selectBody(body, true);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (
+        isTyping(event.target) ||
+        !propsRef.current.flightMode ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      )
+        return;
       const key = event.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'].includes(key)) { event.preventDefault(); keys.add(key); }
+      if (
+        [
+          "w",
+          "a",
+          "s",
+          "d",
+          "arrowup",
+          "arrowdown",
+          "arrowleft",
+          "arrowright",
+          "shift",
+        ].includes(key)
+      ) {
+        keys.add(key);
+        event.preventDefault();
+      }
     };
-    const onKeyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
-    const onBlur = () => { keys.clear(); pointers.clear(); setDragging(false); };
-    const onContextLost = (event: Event) => { event.preventDefault(); setWebglAvailable(false); contextLost = true; hidden = true; cancelAnimationFrame(frame); };
-    const onContextRestored = () => { setWebglAvailable(true); contextLost = false; hidden = document.hidden; if (!hidden) { lastTime = 0; frame = requestAnimationFrame(animate); } };
-    canvas.addEventListener('pointerdown', onPointerDown);
-    canvas.addEventListener('pointermove', onPointerMove);
-    canvas.addEventListener('pointerup', onPointerUp);
-    canvas.addEventListener('pointercancel', onPointerUp);
-    canvas.addEventListener('dblclick', onDoubleClick);
-    canvas.addEventListener('webglcontextlost', onContextLost);
-    canvas.addEventListener('webglcontextrestored', onContextRestored);
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
-    document.addEventListener('visibilitychange', onVisibility);
+    const keyup = (event: KeyboardEvent) =>
+      keys.delete(event.key.toLowerCase());
+    const blur = () => {
+      keys.clear();
+      pointers.clear();
+      setDragging(false);
+    };
+    const visibility = () => {
+      hidden = document.hidden || contextLost;
+      cancelAnimationFrame(frame);
+      keys.clear();
+      if (!hidden) {
+        lastTime = 0;
+        frame = requestAnimationFrame(animate);
+      }
+    };
+    const lost = (event: Event) => {
+      event.preventDefault();
+      contextLost = true;
+      hidden = true;
+      cancelAnimationFrame(frame);
+      setWebglAvailable(false);
+    };
+    const restored = () => {
+      contextLost = false;
+      setWebglAvailable(true);
+      visibility();
+    };
+    const contextMenu = (event: Event) => event.preventDefault();
+    canvas.addEventListener("pointerdown", down);
+    canvas.addEventListener("pointermove", move);
+    canvas.addEventListener("pointerup", up);
+    canvas.addEventListener("pointercancel", up);
+    canvas.addEventListener("dblclick", double);
+    canvas.addEventListener("contextmenu", contextMenu);
+    canvas.addEventListener("webglcontextlost", lost);
+    canvas.addEventListener("webglcontextrestored", restored);
+    window.addEventListener("keydown", keydown);
+    window.addEventListener("keyup", keyup);
+    window.addEventListener("blur", blur);
+    document.addEventListener("visibilitychange", visibility);
     frame = requestAnimationFrame(animate);
     return () => {
-      destroyed = true; cancelAnimationFrame(frame); resizeObserver.disconnect();
-      canvas.removeEventListener('pointerdown', onPointerDown);
-      canvas.removeEventListener('pointermove', onPointerMove);
-      canvas.removeEventListener('pointerup', onPointerUp);
-      canvas.removeEventListener('pointercancel', onPointerUp);
-      canvas.removeEventListener('dblclick', onDoubleClick);
-      canvas.removeEventListener('webglcontextlost', onContextLost);
-      canvas.removeEventListener('webglcontextrestored', onContextRestored);
-      window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); window.removeEventListener('blur', onBlur);
-      document.removeEventListener('visibilitychange', onVisibility);
-      const geometries = new Set<THREE.BufferGeometry>();
-      const materials = new Set<THREE.Material>();
-      scene.traverse(object => {
-        if (object instanceof THREE.Mesh || object instanceof THREE.Points || object instanceof THREE.Line || object instanceof THREE.Sprite) {
-          if ('geometry' in object) geometries.add(object.geometry);
-          const material = object.material;
-          if (Array.isArray(material)) material.forEach(item => materials.add(item)); else materials.add(material);
+      destroyed = true;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      canvas.removeEventListener("pointerdown", down);
+      canvas.removeEventListener("pointermove", move);
+      canvas.removeEventListener("pointerup", up);
+      canvas.removeEventListener("pointercancel", up);
+      canvas.removeEventListener("dblclick", double);
+      canvas.removeEventListener("contextmenu", contextMenu);
+      canvas.removeEventListener("webglcontextlost", lost);
+      canvas.removeEventListener("webglcontextrestored", restored);
+      window.removeEventListener("keydown", keydown);
+      window.removeEventListener("keyup", keyup);
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("visibilitychange", visibility);
+      galaxyModels.forEach((model) => {
+        scene.remove(model.group);
+        model.dispose();
+      });
+      if (system) {
+        scene.remove(system.group);
+        system.dispose();
+      }
+      const geometries = new Set<THREE.BufferGeometry>(),
+        materials = new Set<THREE.Material>();
+      scene.traverse((object) => {
+        if (
+          object instanceof THREE.Mesh ||
+          object instanceof THREE.Line ||
+          object instanceof THREE.Points ||
+          object instanceof THREE.Sprite
+        ) {
+          if ("geometry" in object) geometries.add(object.geometry);
+          const m = object.material;
+          (Array.isArray(m) ? m : [m]).forEach((material) =>
+            materials.add(material),
+          );
         }
       });
-      geometries.forEach(geometry => geometry.dispose()); materials.forEach(material => material.dispose());
+      geometries.forEach((g) => g.dispose());
+      materials.forEach((m) => m.dispose());
       texture.dispose();
-      if (!contextLost) renderer.clear();
       renderer.dispose();
     };
   }, [layout]);
@@ -560,104 +1083,378 @@ export default function GalaxyScene(props: GalaxySceneProps) {
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const onWheel = (event: WheelEvent) => {
-      if (container.clientWidth < 760 && Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const wheel = (event: WheelEvent) => {
       event.preventDefault();
-      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * container.clientHeight : event.deltaY;
       const latest = propsRef.current;
-      if (delta < 0 && latest.depth < 1.65) {
-        const layer = container.querySelector('.galaxy-content-enter');
-        const candidates = Array.from(layer?.querySelectorAll<HTMLElement>('[data-node-id]') ?? []);
-        let nearest: HTMLElement | undefined;
-        let minimum = 100;
-        for (const element of candidates) {
-          if (event.target instanceof Node && element.contains(event.target)) { nearest = element; break; }
-          const marker = element.querySelector('.galaxy-star-marker');
-          const bounds = marker?.getBoundingClientRect();
-          if (!bounds) continue;
-          const distance = Math.hypot(bounds.x + bounds.width / 2 - event.clientX, bounds.y + bounds.height / 2 - event.clientY);
-          if (distance < minimum) { minimum = distance; nearest = element; }
-        }
-        if (nearest?.dataset.nodeId) {
-          if (nearest.dataset.nodeKind === 'question') latest.onSelectQuestion(nearest.dataset.nodeId);
-          else if (nearest.dataset.nodeKind === 'answer') latest.onSelectAnswer(nearest.dataset.nodeId);
+      const delta =
+        event.deltaMode === 1
+          ? event.deltaY * 16
+          : event.deltaMode === 2
+            ? event.deltaY * container.clientHeight
+            : event.deltaY;
+      const level = stageAt(latest.depth);
+      if (delta < 0 && level < 2) {
+        let node = (event.target as HTMLElement)?.closest<HTMLElement>(
+          ".galaxy-content-enter .galaxy-label",
+        );
+        let distance = 90;
+        if (!node)
+          container
+            .querySelectorAll<HTMLElement>(
+              ".galaxy-content-enter .galaxy-label",
+            )
+            .forEach((element) => {
+              const marker = element.querySelector(".galaxy-star-marker");
+              if (!marker || getComputedStyle(element).visibility === "hidden")
+                return;
+              const rect = marker.getBoundingClientRect();
+              const d = Math.hypot(
+                event.clientX - rect.x - rect.width / 2,
+                event.clientY - rect.y - rect.height / 2,
+              );
+              if (d < distance) {
+                distance = d;
+                node = element;
+              }
+            });
+        if (node?.dataset.nodeId) {
+          if (!level) latest.onSelectQuestion(node.dataset.nodeId);
+          else latest.onSelectAnswer(node.dataset.nodeId);
         }
       }
-      latest.onDepthChange(clamp(latest.depth - delta * .0011, 0, 2));
+      latest.onDepthChange(clamp(latest.depth - delta * 0.0011, 0, 2));
     };
-    container.addEventListener('wheel', onWheel, { passive: false });
-    return () => container.removeEventListener('wheel', onWheel);
+    container.addEventListener("wheel", wheel, { passive: false });
+    return () => container.removeEventListener("wheel", wheel);
   }, []);
 
-  const enterQuestion = (question: Question) => { props.onSelectQuestion(question.id); props.onDepthChange(1); };
-  const enterAnswer = (answer: Answer) => { props.onSelectAnswer(answer.id); props.onDepthChange(2); };
-  const sourceSubtitle = (question: Question) => question.kind === 'topic' ? `主题聚合 · ${question.answers.length} 篇原文` : question.kind === 'article' ? '独立文章' : `${question.answers.length} 个回答`;
-
+  const sourceSubtitle = (question: Question) =>
+    question.kind === "topic"
+      ? `主题聚合 · ${question.answers.length} 篇原文`
+      : question.kind === "article"
+        ? "独立文章"
+        : `${question.answers.length} 个回答`;
   return (
-    <div ref={containerRef} className={`galaxy-scene ${dragging ? 'galaxy-is-dragging' : ''} ${!webglAvailable ? 'galaxy-is-fallback' : ''} ${props.reducedMotion ? 'galaxy-reduced-motion' : ''}`} data-depth={stage} aria-label="知识宇宙探索">
+    <div
+      ref={containerRef}
+      className={`galaxy-scene galaxy-spatial ${dragging ? "galaxy-is-dragging" : ""} ${!webglAvailable ? "galaxy-is-fallback" : ""} ${props.reducedMotion ? "galaxy-reduced-motion" : ""}`}
+      data-depth={stage}
+      aria-label="知识宇宙探索"
+    >
       <CosmicBackdrop depth={props.depth} reducedMotion={props.reducedMotion} />
-      <canvas ref={canvasRef} className="galaxy-canvas" tabIndex={0} aria-label="三维知识星空。滚轮向上深入，向下返回，拖动调整视角；选择星光可进入下一层。" />
+      <canvas
+        ref={canvasRef}
+        className="galaxy-canvas"
+        tabIndex={0}
+        aria-label="三维知识星空。滚轮深入或返回；拖动旋转视角，Shift 拖动平移；星体与文字一起移动。"
+      />
       <div className="galaxy-vignette" aria-hidden="true" />
-      {!webglAvailable && <span className="galaxy-fallback-notice">二维星图</span>}
-      {layers.map(layer => {
-        const exiting = layer.phase === 'exit';
-        const question = layer.key === layerKey ? selectedQuestion : layer.question;
+      {!webglAvailable && (
+        <span className="galaxy-fallback-notice">二维星图</span>
+      )}
+      {layers.map((layer) => {
+        const exiting = layer.phase === "exit";
+        const question =
+          layer.key === layerKey ? selectedQuestion : layer.question;
         const answer = layer.key === layerKey ? selectedAnswer : layer.answer;
-        const questions = layer.key === layerKey ? props.questions : layer.questions;
-        const phase = layer.phase;
-        const layerHighlights = answer ? meaningfulHighlights(answer) : [];
-        const items = layer.stage === 0 ? questions : layer.stage === 1 ? question?.answers ?? [] : layerHighlights;
-        const pageSize = 4;
-        const visibleItems = layer.stage === 0 ? items : items.slice(page * pageSize, page * pageSize + pageSize);
-        const positions = orbitPositions(visibleItems.length, layer.stage === 2);
-        const txt = (text: string, className = '') => <StellarText text={text} phase={phase} reducedMotion={props.reducedMotion} className={className} />;
-        return <div key={layer.id} className={`galaxy-content-layer galaxy-content-${layer.stage} galaxy-content-${phase}`} aria-hidden={exiting || undefined} ref={element => { if (element) element.inert = exiting; }}>
-          {layer.stage > 0 && question && <>
-            <svg className="galaxy-orbit-lines" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
-              <ellipse cx="500" cy="354" rx="330" ry="228" />
-              <ellipse cx="500" cy="354" rx="344" ry="239" className="galaxy-orbit-faint" />
-              {positions.map(([x, y], index) => <path key={index} d={`M 500 354 Q ${x * 10} 354 ${x * 10} ${y * 7}`} />)}
-            </svg>
-            <div className={`galaxy-hub ${layer.stage === 2 ? 'galaxy-hub-article' : ''}`} style={{ '--galaxy-star-color': question.color } as React.CSSProperties}>
-              <div className="galaxy-hub-star" aria-hidden="true"><i /><span /></div>
-              <span className="galaxy-hub-kind">{layer.stage === 1 ? (question.kind === 'topic' ? 'THEME' : question.kind === 'article' ? 'ARTICLE' : 'QUESTION') : 'ARTICLE'}<i /></span>
-              {layer.stage === 2 && answer ? <button className="galaxy-hub-title" onClick={() => props.onOpenReader()} aria-label={`阅读原文：${answer.title}`}>{txt(answer.title)}</button> : <h1 className="galaxy-hub-title">{txt(question.title)}</h1>}
-              <span className="galaxy-hub-meta">{layer.stage === 1 ? sourceSubtitle(question) : answer?.author}</span>
-              {layer.stage === 2 && <button className="galaxy-hub-read" onClick={() => props.onOpenReader()}>展开原文阅览 <span aria-hidden="true">↗</span></button>}
-              {items.length > pageSize && <div className="galaxy-orbit-pagination"><button onClick={() => setPage(value => Math.max(0, value - 1))} disabled={!page} aria-label="上一组星光">←</button><span>{page * pageSize + 1}—{Math.min(items.length, page * pageSize + pageSize)} / {items.length}</span><button disabled={(page + 1) * pageSize >= items.length} onClick={() => setPage(value => value + 1)} aria-label="下一组星光">→</button></div>}
-            </div>
-          </>}
-          <div className="galaxy-labels" aria-label={layer.stage === 0 ? '相关问题星系' : layer.stage === 1 ? '问题中的回答' : '文章精华段落'}>
-            {visibleItems.map((item, index) => {
-              const isQuestion = layer.stage === 0, isParagraph = layer.stage === 2;
-              const q = isQuestion ? item as Question : question;
-              const a = layer.stage === 1 ? item as Answer : answer;
-              const highlight = isParagraph ? item as Highlight : null;
-              const title = highlight ? highlight.text : isQuestion ? q!.title : a!.title;
-              const selected = isQuestion ? q?.id === props.selectedQuestionId : isParagraph ? highlight?.paragraphIndex === props.selectedParagraph && (!props.selectedQuote || highlight.text === props.selectedQuote) : a?.id === props.selectedAnswerId;
-              const key = isQuestion ? `q:${item.id}` : isParagraph ? `p:${item.id}` : `a:${item.id}`;
-              const r = relevance(isQuestion ? q!.relevance : a?.relevance ?? 1);
-              const luminosity = .1 + Math.pow(r, 4.1) * 2.4;
-              const [left, top] = positions[index] ?? [50, 50];
-              const select = () => { if (isQuestion) props.onSelectQuestion(q!.id); else if (highlight) props.onSelectParagraph(highlight.paragraphIndex, highlight.text); else props.onSelectAnswer(a!.id); };
-              const enter = () => { if (isQuestion) enterQuestion(q!); else if (highlight) props.onOpenReader(highlight.paragraphIndex, highlight.text); else enterAnswer(a!); };
-              return <div key={key} data-node-id={item.id} data-node-kind={isQuestion ? 'question' : isParagraph ? 'paragraph' : 'answer'} ref={element => { if (!exiting) { if (element) labelsRef.current.set(key, element); else labelsRef.current.delete(key); } }}
-                className={`galaxy-label ${selected ? 'galaxy-label-selected' : ''} ${isParagraph ? 'galaxy-label-paragraph' : ''}`}
-                style={{ left: `${left}%`, top: `${top}%`, '--galaxy-star-color': q?.color ?? '#c5dbe6', '--star-power': luminosity, '--node-index': index } as React.CSSProperties}>
-                <button className="galaxy-star-marker" onClick={select} onDoubleClick={enter} aria-label={`聚焦${isQuestion ? '问题' : isParagraph ? '段落' : '回答'}：${title.slice(0, 70)}`} aria-pressed={selected}><span /><i /></button>
-                <div className="galaxy-label-body">
-                  <span className="galaxy-label-eyebrow">{isQuestion ? (q?.kind === 'topic' ? 'THEME' : q?.kind === 'article' ? 'ARTICLE' : 'QUESTION') : isParagraph ? `EXCERPT ${String(page * pageSize + index + 1).padStart(2, '0')}` : question?.kind === 'topic' || question?.kind === 'article' ? 'ARTICLE' : 'ANSWER'}<i /></span>
-                  <button className="galaxy-label-title" onClick={isParagraph ? select : enter} onDoubleClick={isParagraph ? enter : undefined}>{txt(isParagraph && title.length > 180 ? `${title.slice(0, 180)}…` : title)}</button>
-                  <span className="galaxy-label-meta">{isQuestion ? sourceSubtitle(q!) : highlight ? `原文第 ${highlight.paragraphIndex + 1} 段${selected ? ' · 已选中' : ''}` : a?.author}</span>
-                  {!isParagraph && <button className="galaxy-label-enter" onClick={enter} aria-label={`${isQuestion ? '进入星系' : '阅读观点'}：${title}`}>{isQuestion ? '进入星系' : (question?.kind === 'topic' || question?.kind === 'article' ? '深入这篇文章' : '深入这篇回答')}<span aria-hidden="true">↗</span></button>}
-                  {isParagraph && <button className="galaxy-label-enter" onClick={enter} aria-label={`在原文中阅读第 ${highlight!.paragraphIndex + 1} 段`}>在原文中阅读<span aria-hidden="true">↗</span></button>}
+        const questions =
+          layer.key === layerKey ? props.questions : layer.questions;
+        const items =
+          layer.stage === 0
+            ? questions
+            : layer.stage === 1
+              ? (question?.answers ?? [])
+              : answer
+                ? meaningfulHighlights(answer)
+                : [];
+        const visible = layer.stage
+          ? items.slice(
+              page * pageSizeRef.current,
+              (page + 1) * pageSizeRef.current,
+            )
+          : items;
+        const text = (value: string) => (
+          <StellarText
+            text={value}
+            phase={layer.phase}
+            reducedMotion={props.reducedMotion}
+          />
+        );
+        const spec = question
+          ? layout.find((node) => node.question.id === question.id)?.spec
+          : undefined;
+        return (
+          <div
+            key={layer.id}
+            className={`galaxy-content-layer galaxy-content-${layer.stage} galaxy-content-${layer.phase}`}
+            aria-hidden={exiting || undefined}
+            ref={(element) => {
+              if (element) element.inert = exiting;
+            }}
+          >
+            {layer.stage > 0 && question && (
+              <>
+                <button
+                  ref={(element) => {
+                    if (!exiting) coreRef.current = element;
+                  }}
+                  className="galaxy-core-hit"
+                  aria-label={
+                    layer.stage === 2 ? "打开中心文章原文" : "聚焦星系核心问题"
+                  }
+                  onClick={() => {
+                    if (layer.stage === 2) props.onOpenReader();
+                  }}
+                />
+                <div
+                  ref={(element) => {
+                    if (!exiting) hubRef.current = element;
+                  }}
+                  className={`galaxy-hub ${layer.stage === 2 ? "galaxy-hub-article" : ""}`}
+                  style={
+                    {
+                      "--galaxy-star-color": question.color,
+                    } as React.CSSProperties
+                  }
+                >
+                  <span className="galaxy-hub-kind">
+                    {layer.stage === 2 || question.kind === "article"
+                      ? "ARTICLE"
+                      : question.kind === "topic"
+                        ? "THEME"
+                        : "QUESTION"}
+                    <i />
+                  </span>
+                  {layer.stage === 2 && answer ? (
+                    <button
+                      className="galaxy-hub-title"
+                      onClick={() => props.onOpenReader()}
+                      aria-label={`阅读原文：${answer.title}`}
+                    >
+                      {text(answer.title)}
+                    </button>
+                  ) : (
+                    <h1 className="galaxy-hub-title">{text(question.title)}</h1>
+                  )}
+                  <span className="galaxy-hub-meta">
+                    {layer.stage === 1
+                      ? `${sourceSubtitle(question)}${spec ? ` · ${spec.label}` : ""}`
+                      : answer?.author}
+                  </span>
+                  {layer.stage === 2 && (
+                    <button
+                      className="galaxy-hub-read"
+                      onClick={() => props.onOpenReader()}
+                    >
+                      展开原文阅览 <kbd>F</kbd>
+                    </button>
+                  )}
+                  {items.length > pageSizeRef.current && (
+                    <div className="galaxy-orbit-pagination">
+                      <button
+                        aria-label="上一组星光"
+                        disabled={!page}
+                        onClick={() =>
+                          setPage((value) => Math.max(0, value - 1))
+                        }
+                      >
+                        ←
+                      </button>
+                      <span>
+                        {page * pageSizeRef.current + 1}—
+                        {Math.min(
+                          items.length,
+                          (page + 1) * pageSizeRef.current,
+                        )}{" "}
+                        / {items.length}
+                      </span>
+                      <button
+                        aria-label="下一组星光"
+                        disabled={
+                          (page + 1) * pageSizeRef.current >= items.length
+                        }
+                        onClick={() => setPage((value) => value + 1)}
+                      >
+                        →
+                      </button>
+                    </div>
+                  )}
                 </div>
-              </div>;
-            })}
+              </>
+            )}
+            <div
+              className="galaxy-labels"
+              aria-label={
+                layer.stage === 0
+                  ? "相关问题星系"
+                  : layer.stage === 1
+                    ? "问题中的回答"
+                    : "文章精华段落"
+              }
+            >
+              {visible.map((item, index) => {
+                const isQuestion = layer.stage === 0,
+                  isParagraph = layer.stage === 2;
+                const q = isQuestion ? (item as Question) : question;
+                const a = layer.stage === 1 ? (item as Answer) : answer;
+                const highlight = isParagraph ? (item as Highlight) : undefined;
+                const title =
+                  highlight?.text ?? (isQuestion ? q!.title : a!.title);
+                const key = `${isQuestion ? "q" : isParagraph ? "p" : "a"}:${item.id}`;
+                const selected = isQuestion
+                  ? q?.id === props.selectedQuestionId
+                  : isParagraph
+                    ? highlight?.paragraphIndex === props.selectedParagraph &&
+                      (!props.selectedQuote ||
+                        highlight.text === props.selectedQuote)
+                    : a?.id === props.selectedAnswerId;
+                const r = relevance(
+                  isQuestion ? q!.relevance : (a?.relevance ?? 1),
+                );
+                const select = () => {
+                  if (isQuestion) props.onSelectQuestion(q!.id);
+                  else if (highlight)
+                    props.onSelectParagraph(
+                      highlight.paragraphIndex,
+                      highlight.text,
+                    );
+                  else props.onSelectAnswer(a!.id);
+                };
+                const enter = () => {
+                  if (isQuestion) {
+                    props.onSelectQuestion(q!.id);
+                    props.onDepthChange(1);
+                  } else if (highlight)
+                    props.onOpenReader(
+                      highlight.paragraphIndex,
+                      highlight.text,
+                    );
+                  else {
+                    props.onSelectAnswer(a!.id);
+                    props.onDepthChange(2);
+                  }
+                };
+                return (
+                  <div
+                    key={key}
+                    data-node-id={item.id}
+                    data-node-kind={
+                      isQuestion
+                        ? "question"
+                        : isParagraph
+                          ? "paragraph"
+                          : "answer"
+                    }
+                    data-morphology={
+                      isQuestion
+                        ? layout.find((node) => node.question.id === q!.id)
+                            ?.spec.kind
+                        : undefined
+                    }
+                    data-planet-kind={
+                      isParagraph
+                        ? getPlanetKind(
+                            a!.id,
+                            page * pageSizeRef.current + index,
+                          )
+                        : undefined
+                    }
+                    ref={(element) => {
+                      if (!exiting) {
+                        if (element) labelsRef.current.set(key, element);
+                        else labelsRef.current.delete(key);
+                      }
+                    }}
+                    className={`galaxy-label ${selected ? "galaxy-label-selected" : ""} ${isParagraph ? "galaxy-label-paragraph" : ""}`}
+                    style={
+                      {
+                        "--galaxy-star-color": q?.color ?? "#b4d4e4",
+                        "--star-power": 0.1 + Math.pow(r, 4.1) * 2.4,
+                        "--node-index": index,
+                      } as React.CSSProperties
+                    }
+                  >
+                    <button
+                      className="galaxy-star-marker"
+                      onClick={select}
+                      onDoubleClick={enter}
+                      aria-label={`聚焦${isQuestion ? "问题" : isParagraph ? "段落" : "回答"}：${title.slice(0, 70)}`}
+                      aria-pressed={selected}
+                    >
+                      <span />
+                      <i />
+                    </button>
+                    <svg className="galaxy-label-leader" aria-hidden="true">
+                      <line x1="0" y1="0" x2="0" y2="0" />
+                    </svg>
+                    <div className="galaxy-label-body">
+                      <span className="galaxy-label-eyebrow">
+                        {isQuestion
+                          ? q?.kind === "topic"
+                            ? "THEME"
+                            : q?.kind === "article"
+                              ? "ARTICLE"
+                              : "QUESTION"
+                          : isParagraph
+                            ? `EXCERPT ${String(page * pageSizeRef.current + index + 1).padStart(2, "0")}`
+                            : question?.kind === "topic" ||
+                                question?.kind === "article"
+                              ? "ARTICLE"
+                              : "ANSWER"}
+                        <i />
+                      </span>
+                      <button
+                        className="galaxy-label-title"
+                        onClick={isParagraph ? select : enter}
+                        onDoubleClick={isParagraph ? enter : undefined}
+                      >
+                        {text(
+                          isParagraph && title.length > 180
+                            ? `${title.slice(0, 180)}…`
+                            : title,
+                        )}
+                      </button>
+                      <span className="galaxy-label-meta">
+                        {isQuestion
+                          ? `${sourceSubtitle(q!)} · ${layout.find((node) => node.question.id === q!.id)?.spec.label ?? ""}`
+                          : highlight
+                            ? `原文第 ${highlight.paragraphIndex + 1} 段 · ${planetKindNames[getPlanetKind(a!.id, page * pageSizeRef.current + index)]}${selected ? " · 已选中" : ""}`
+                            : a?.author}
+                      </span>
+                      {!highlight ? (
+                        <button
+                          className="galaxy-label-enter"
+                          onClick={enter}
+                          aria-label={`${isQuestion ? "进入星系" : "阅读观点"}：${title}`}
+                        >
+                          {isQuestion ? "进入星系" : "深入这篇文章"}
+                          <span aria-hidden="true">↗</span>
+                        </button>
+                      ) : (
+                        <button
+                          className="galaxy-label-enter"
+                          onClick={enter}
+                          aria-label={`在原文中阅读第 ${highlight.paragraphIndex + 1} 段`}
+                        >
+                          在原文中阅读<span aria-hidden="true">↗</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>;
+        );
       })}
-      {props.flightMode && <div className="galaxy-flight-hud" aria-hidden="true"><span className="galaxy-reticle" /><div className="galaxy-flight-caption">W A S D 飞行 · SHIFT 加速</div></div>}
+      {props.flightMode && (
+        <div className="galaxy-flight-hud" aria-hidden="true">
+          <span className="galaxy-reticle" />
+          <div className="galaxy-flight-caption">
+            V · W A S D 飞行 · SHIFT 加速
+          </div>
+        </div>
+      )}
     </div>
   );
 }
