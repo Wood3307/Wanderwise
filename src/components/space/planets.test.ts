@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as THREE from 'three';
-import { createPlanetarySystem, getPlanetKind } from './planets';
+import { createPlanetarySystem, getPlanetKind, getPlanetPalette, planetKindNames } from './planets';
+import { getStarStyle } from './stars';
 
 test('paragraphs become distinct three-dimensional planets with shared live anchors', () => {
   const system = createPlanetarySystem({ seed: 'a-real-answer', count: 6, mobile: false });
@@ -96,21 +97,75 @@ test('central light tracks group transforms and opacity reaches every visible ma
     scene.add(system.group);
     system.update(0, false);
     system.setOpacity(0.35);
+    let litMaterials = 0;
     system.group.traverse(object => {
       if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite || object instanceof THREE.LineLoop)) return;
       const material = object.material as THREE.Material;
       if (material instanceof THREE.ShaderMaterial) {
         assert.equal(material.uniforms.uOpacity.value, 0.35);
-        assert.deepEqual(material.uniforms.uStarPosition.value.toArray(), [8, 11, 14]);
+        if (material.uniforms.uStarPosition) {
+          assert.deepEqual(material.uniforms.uStarPosition.value.toArray(), [8, 11, 14]);
+          litMaterials++;
+        }
       } else {
         assert.ok(material.opacity > 0 && material.opacity <= 0.35);
       }
     });
+    // Each planet has a lit surface and atmospheric shell, plus the one ring;
+    // the central emissive star deliberately has no incident-light uniform.
+    assert.equal(litMaterials, system.planets.length * 2 + 1);
     system.setOpacity(0);
     assert.equal(system.group.visible, false);
     system.setOpacity(4);
     assert.equal(system.group.visible, true);
   } finally { system.dispose(); }
+});
+
+test('article stars retain the same seeded identity as answer stars', () => {
+  const seeds = ['answer-one', 'answer-two', '知乎回答', 'cold-plasma', 'warm-disc'];
+  for (const seed of seeds) {
+    const system = createPlanetarySystem({ seed, count: 4, mobile: true });
+    try {
+      assert.equal(system.star.userData.starKind, getStarStyle(seed).kind);
+      const photosphere = system.star.getObjectByName('stellar-photosphere') as THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
+      assert.equal(photosphere.material.uniforms.uCore.value.getHexString(), new THREE.Color(getStarStyle(seed).core).getHexString());
+      assert.equal(photosphere.geometry.parameters.radius, 1.22);
+      system.update(0, false);
+      system.update(0.1, false);
+      const time = photosphere.material.uniforms.uTime.value;
+      assert.ok(time > 0);
+      system.update(1, false, true);
+      assert.equal(photosphere.material.uniforms.uTime.value, time);
+    } finally { system.dispose(); }
+  }
+});
+
+test('fictional fluid worlds and gas giants have repeatable mineral palettes across articles', () => {
+  const fluidPalettes = new Set<string>();
+  const gasPalettes = new Set<string>();
+  assert.equal(planetKindNames.ocean, '异质流体星');
+  for (let article = 0; article < 12; article++) {
+    const seed = `palette-answer-${article}`;
+    const system = createPlanetarySystem({ seed, count: 4, mobile: true });
+    try {
+      for (const planet of system.planets) {
+        const palette = getPlanetPalette(seed, planet.index);
+        assert.deepEqual(palette, getPlanetPalette(seed, planet.index));
+        const surface = planet.object.children[0] as THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
+        assert.equal(surface.material.uniforms.uPaletteDark.value.getHexString(), new THREE.Color(palette.dark).getHexString());
+        assert.equal(surface.material.uniforms.uPaletteLight.value.getHexString(), new THREE.Color(palette.light).getHexString());
+        if (planet.kind === 'ocean') {
+          fluidPalettes.add(palette.light);
+          // Lavender and pearl fluid bases: there is no green terrain palette.
+          const light = new THREE.Color(palette.light);
+          assert.ok(light.g < Math.max(light.r, light.b));
+        }
+        if (planet.kind === 'gas') gasPalettes.add(palette.light);
+      }
+    } finally { system.dispose(); }
+  }
+  assert.equal(fluidPalettes.size, 3);
+  assert.equal(gasPalettes.size, 3);
 });
 
 test('disposal releases shared resources once and detaches the system', () => {

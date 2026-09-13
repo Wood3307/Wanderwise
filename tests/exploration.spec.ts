@@ -48,13 +48,33 @@ test.beforeEach(async ({ page }) => {
 
 const active = (page: Page) => page.locator('.galaxy-content-enter');
 const visiblePageSize = (page: Page) => (page.viewportSize()?.width ?? 1440) < 760 ? 2 : 4;
+async function hoverMovingCelestialText(page: Page, button: Locator): Promise<void> {
+  if (await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
+  await expect(button).toBeVisible();
+  let previous: { x: number; y: number } | undefined;
+  // Wait for the camera flight, but permit the subpixel drift of a slowly
+  // rotating star. Move the actual pointer first: locator.hover()/click() wait
+  // for exact pixel stability before hovering, so they cannot initiate this
+  // deliberate hover-to-pause interaction by themselves.
+  await expect.poll(async () => {
+    const box = (await button.boundingBox())!;
+    const movement = previous ? Math.hypot(box.x - previous.x, box.y - previous.y) : Infinity;
+    previous = box;
+    return movement;
+  }, { intervals: [200, 250] }).toBeLessThan(1);
+  const box = (await button.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-motion-paused', 'true');
+}
 async function arrive(page: Page): Promise<void> {
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '0');
   await expect(active(page).getByRole('button', { name: /^进入星系：/ }).first()).toBeVisible();
 }
 async function enterQuestion(page: Page): Promise<void> {
-  await active(page).getByRole('button', { name: `进入星系：${question.title}`, exact: true }).click();
+  const enter = active(page).getByRole('button', { name: `进入星系：${question.title}`, exact: true });
+  await hoverMovingCelestialText(page, enter);
+  await enter.click();
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '1');
   await expect(active(page).locator('.galaxy-hub-title')).toHaveText(question.title);
   await expect(active(page).locator('.galaxy-hub')).toHaveAttribute('data-screen-x', /-?\d/);
@@ -62,14 +82,18 @@ async function enterQuestion(page: Page): Promise<void> {
 }
 async function enterArticle(page: Page, answer = answers[0]): Promise<void> {
   if (await page.locator('.galaxy-scene').getAttribute('data-depth') === '0') await enterQuestion(page);
-  await active(page).getByRole('button', { name: `阅读观点：${answer.title}`, exact: true }).click();
+  const enter = active(page).getByRole('button', { name: `阅读观点：${answer.title}`, exact: true });
+  await hoverMovingCelestialText(page, enter);
+  await enter.click();
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '2');
   await expect(active(page).getByRole('button', { name: `阅读原文：${answer.title}`, exact: true })).toBeVisible();
   await expect(active(page).locator('.galaxy-hub')).toHaveAttribute('data-screen-x', /-?\d/);
   await expect(active(page).locator('.galaxy-label-paragraph')).toHaveCount(Math.min(answer.highlights?.length ?? answer.paragraphs.length, visiblePageSize(page)));
 }
 async function openReader(page: Page, answer = answers[0]): Promise<void> {
-  await active(page).getByRole('button', { name: `阅读原文：${answer.title}`, exact: true }).click();
+  const enter = active(page).getByRole('button', { name: `阅读原文：${answer.title}`, exact: true });
+  await hoverMovingCelestialText(page, enter);
+  await enter.click();
   await expect(page.getByRole('dialog', { name: '原文阅览', exact: true })).toBeVisible();
 }
 async function openBag(page: Page): Promise<void> {
@@ -104,17 +128,18 @@ async function projectionSnapshot(label: Locator) {
 }
 
 async function dragUncoveredCanvas(page: Page, dx = 74, dy = 26) {
-  const start = await page.locator('.galaxy-canvas').evaluate(canvas => {
+  const start = await page.locator('.galaxy-canvas').evaluate((canvas, movement) => {
     const rect = canvas.getBoundingClientRect();
     for (const fy of [0.76, 0.66, 0.56, 0.43, 0.84]) {
       for (const fx of [0.5, 0.4, 0.6, 0.3, 0.7]) {
         const x = rect.x + rect.width * fx;
         const y = rect.y + rect.height * fy;
+        if (x + movement.dx < rect.left + 12 || x + movement.dx > rect.right - 12 || y + movement.dy < rect.top + 12 || y + movement.dy > rect.bottom - 12) continue;
         if (document.elementFromPoint(x, y) === canvas) return { x, y };
       }
     }
     throw new Error('No uncovered canvas area is available for camera dragging.');
-  });
+  }, { dx, dy });
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(start.x + dx, start.y + dy, { steps: 12 });
@@ -676,4 +701,164 @@ test('overview galaxy shapes and the four excerpt planets expose distinct celest
   expect(planets.every(Boolean)).toBe(true);
   await expect(active(page).locator('.galaxy-label-title')).toHaveText(paragraphs.slice(0, 4));
   await page.screenshot({ path: testInfo.outputPath('four-distinct-excerpt-planets.png'), animations: 'disabled' });
+});
+
+test('the macro cluster occupies a real volume and stays readable from the sides and above', async ({ page }, testInfo) => {
+  const questions = Array.from({ length: 5 }, (_, index) => index === 0 ? question : ({
+    ...question, id: `volume-question-${index}`, title: `从不同方向观察第 ${index + 1} 个知识星系`,
+    answers: answers.map(answer => ({ ...answer, id: `${answer.id}-volume-${index}` })),
+  }));
+  await page.route('**/api/explore?**', route => fulfill(route, { ...discovery(), questions }));
+  await arrive(page);
+  const labels = active(page).locator('.galaxy-label[data-node-kind="question"]');
+  await expect(labels).toHaveCount(5);
+  await expect(labels.last()).toHaveAttribute('data-world-z', /-?\d/);
+  const readWorld = () => labels.evaluateAll(nodes => nodes.map(node => {
+    const element = node as HTMLElement;
+    return [Number(element.dataset.worldX), Number(element.dataset.worldY), Number(element.dataset.worldZ)];
+  }));
+  const world = await readWorld();
+  const extents = [0, 1, 2].map(axis => Math.max(...world.map(point => point[axis])) - Math.min(...world.map(point => point[axis])));
+  expect(Math.min(...extents) / Math.max(...extents)).toBeGreaterThan(0.7);
+  const center = [0, 1, 2].map(axis => world.reduce((sum, point) => sum + point[axis], 0) / world.length);
+  const covariance = Array.from({ length: 3 }, (_, row) => Array.from({ length: 3 }, (_, column) => (
+    world.reduce((sum, point) => sum + (point[row] - center[row]) * (point[column] - center[column]), 0)
+  )));
+  const [[xx, xy, xz], [, yy, yz], [, , zz]] = covariance;
+  const determinant = xx * yy * zz + 2 * xy * xz * yz - xx * yz * yz - yy * xz * xz - zz * xy * xy;
+  expect(determinant / (xx * yy * zz)).toBeGreaterThan(0.5);
+
+  const selected = active(page).locator(`.galaxy-label[data-node-id="${question.id}"]`);
+  await selected.locator('.galaxy-star-marker').click();
+  for (const view of [
+    { name: 'left', dx: 294, dy: 0 }, { name: 'right', dx: -588, dy: 0 },
+    { name: 'above', dx: 294, dy: 300 }, { name: 'below', dx: 0, dy: -600 },
+  ]) {
+    const before = await projectionSnapshot(selected);
+    await dragUncoveredCanvas(page, view.dx, view.dy);
+    await expect.poll(async () => {
+      const now = (await projectionSnapshot(selected)).screen;
+      return Math.hypot(now[0] - before.screen[0], now[1] - before.screen[1]);
+    }).toBeGreaterThan(8);
+    await expect(selected.locator('.galaxy-label-title')).toBeVisible();
+    const projected = await labels.evaluateAll(nodes => nodes.map(node => {
+      const element = node as HTMLElement;
+      const body = element.querySelector<HTMLElement>('.galaxy-label-body')!;
+      return { x: Number(element.dataset.screenX), y: Number(element.dataset.screenY), visible: getComputedStyle(body).visibility !== 'hidden' };
+    }));
+    expect(Math.max(...projected.map(point => point.x)) - Math.min(...projected.map(point => point.x))).toBeGreaterThan(150);
+    expect(Math.max(...projected.map(point => point.y)) - Math.min(...projected.map(point => point.y))).toBeGreaterThan(150);
+    expect(projected.filter(point => point.visible).length).toBeGreaterThanOrEqual(3);
+    const readable = await projectionSnapshot(selected);
+    expect(readable.horizontal).toBe(true);
+    expect(readable.fontSize).toBeGreaterThanOrEqual(13);
+    expect(readable.text.width).toBeGreaterThanOrEqual(175);
+    expect(readable.text.x).toBeGreaterThanOrEqual(0);
+    expect(readable.text.y).toBeGreaterThanOrEqual(0);
+    expect(readable.text.x + readable.text.width).toBeLessThanOrEqual(1440);
+    expect(readable.text.y + readable.text.height).toBeLessThanOrEqual(960);
+    expect(await readWorld()).toEqual(world);
+    await page.screenshot({ path: testInfo.outputPath(`volumetric-cluster-${view.name}.png`), animations: 'disabled' });
+  }
+});
+
+test('answer stars have varied identities that persist when entering their planetary systems', async ({ page }) => {
+  await arrive(page);
+  await enterQuestion(page);
+  const kinds = new Map<string, string>();
+  for (const answer of answers) {
+    const label = active(page).locator(`.galaxy-label[data-node-id="${answer.id}"]`);
+    await expect(label).toHaveAttribute('data-star-kind', /^(azure|violet|ivory|amber)$/);
+    kinds.set(answer.id, (await label.getAttribute('data-star-kind'))!);
+  }
+  expect(new Set(kinds.values()).size).toBeGreaterThanOrEqual(2);
+  for (const answer of answers) {
+    await enterArticle(page, answer);
+    await expect(active(page).locator('.galaxy-hub')).toHaveAttribute('data-star-kind', kinds.get(answer.id)!);
+    await expect(active(page).getByRole('button', { name: `阅读原文：${answer.title}`, exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '1');
+    await expect(active(page).locator(`.galaxy-label[data-node-id="${answer.id}"]`)).toHaveAttribute('data-star-kind', kinds.get(answer.id)!);
+  }
+});
+
+// Observe real animation writes, rather than assume a fixed frame rate on the
+// software renderer. Each sample is the applied galaxy rotation after 15 frames.
+async function sampleGalaxyMotion(page: Page, count = 2): Promise<{ angle: number; time: number }[]> {
+  return page.locator('.galaxy-scene').evaluate((scene, needed) => new Promise((resolve, reject) => {
+    const samples: { angle: number; time: number }[] = [];
+    const timer = window.setTimeout(() => { observer.disconnect(); reject(new Error('The scene stopped producing animation frames.')); }, 15_000);
+    const observer = new MutationObserver(() => {
+      samples.push({ angle: Number((scene as HTMLElement).dataset.galaxyRotation), time: performance.now() });
+      if (samples.length >= needed) { observer.disconnect(); clearTimeout(timer); resolve(samples); }
+    });
+    observer.observe(scene, { attributes: true, attributeFilter: ['data-galaxy-rotation'] });
+  }), count);
+}
+
+async function leaveCelestialText(page: Page) {
+  await page.mouse.move(10, 300);
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
+}
+
+test('slow galaxy rotation pauses for hover, keyboard reading and the reader, then resumes without jumping', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await arrive(page);
+  await enterQuestion(page);
+  await leaveCelestialText(page);
+  const scene = page.locator('.galaxy-scene');
+  await expect(scene).toHaveAttribute('data-motion-paused', 'false');
+  const moving = await sampleGalaxyMotion(page);
+  expect(moving[1].angle).toBeGreaterThan(moving[0].angle);
+  expect((moving[1].angle - moving[0].angle) / ((moving[1].time - moving[0].time) / 1000)).toBeLessThan(0.004);
+
+  const label = active(page).locator(`.galaxy-label[data-node-id="${answers[0].id}"]`);
+  await hoverMovingCelestialText(page, label.locator('.galaxy-label-title'));
+  await expect(scene).toHaveAttribute('data-motion-paused', 'true');
+  const hovering = await sampleGalaxyMotion(page);
+  expect(hovering[1].angle).toBe(hovering[0].angle);
+  const hoveredAnchor = (await projectionSnapshot(label)).world;
+  await label.locator('.galaxy-label-title').focus();
+  await page.mouse.move(10, 300);
+  await expect(scene).toHaveAttribute('data-motion-paused', 'true');
+  const focused = await sampleGalaxyMotion(page);
+  expect(focused[1].angle).toBe(hovering[1].angle);
+  expect((await projectionSnapshot(label)).world).toEqual(hoveredAnchor);
+
+  const resumingAt = await page.evaluate(() => performance.now());
+  await leaveCelestialText(page);
+  await expect(scene).toHaveAttribute('data-motion-paused', 'false');
+  const resumed = await sampleGalaxyMotion(page);
+  expect(resumed[1].angle).toBeGreaterThan(focused[1].angle);
+  expect(resumed[0].angle - focused[1].angle).toBeLessThan((resumed[0].time - resumingAt) / 1000 * 0.004 + 0.0001);
+
+  await enterArticle(page);
+  await page.keyboard.press('f');
+  await expect(page.getByRole('dialog', { name: '原文阅览', exact: true })).toBeVisible();
+  await leaveCelestialText(page);
+  await expect(scene).toHaveAttribute('data-motion-paused', 'true');
+  const reading = await sampleGalaxyMotion(page);
+  expect(reading[1].angle).toBe(reading[0].angle);
+  await page.keyboard.press('f');
+  await expect(page.getByRole('dialog', { name: '原文阅览', exact: true })).toBeHidden();
+  await leaveCelestialText(page);
+  await expect(scene).toHaveAttribute('data-motion-paused', 'false');
+  const afterReader = await sampleGalaxyMotion(page);
+  expect(afterReader[1].angle).toBeGreaterThan(reading[1].angle);
+});
+
+test('reduced motion keeps rotating galaxies and their answer anchors still while camera dragging remains available', async ({ page }) => {
+  await arrive(page);
+  await enterQuestion(page);
+  await leaveCelestialText(page);
+  const scene = page.locator('.galaxy-scene');
+  await expect(scene).toHaveAttribute('data-motion-paused', 'true');
+  const label = active(page).locator(`.galaxy-label[data-node-id="${answers[0].id}"]`);
+  const before = (await projectionSnapshot(label)).world;
+  const still = await sampleGalaxyMotion(page);
+  expect(still[1].angle).toBe(still[0].angle);
+  expect((await projectionSnapshot(label)).world).toEqual(before);
+  await expectAnchoredDrag(page, label);
+  await expect(scene).toHaveAttribute('data-motion-paused', 'true');
 });

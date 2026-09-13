@@ -3,6 +3,9 @@ import * as THREE from "three";
 import type { Answer, Highlight, Question } from "../types";
 import StellarText from "./StellarText";
 import CosmicBackdrop from "./CosmicBackdrop";
+import { createClusterLayout } from "./space/cluster-layout";
+import { createStar, getStarStyle } from "./space/stars";
+import { createCometField } from "./space/comets";
 import {
   answerLocalPosition,
   createGalaxy,
@@ -44,7 +47,12 @@ interface GalaxyNode {
   question: Question;
   spec: GalaxySpec;
   position: THREE.Vector3;
-  answers: { answer: Answer; position: THREE.Vector3 }[];
+  rotation: THREE.Quaternion;
+  answers: {
+    answer: Answer;
+    localPosition: THREE.Vector3;
+    position: THREE.Vector3;
+  }[];
 }
 interface ContentLayer {
   id: number;
@@ -96,40 +104,33 @@ function seededRandom(seed: string) {
   };
 }
 function makeLayout(questions: Question[]): GalaxyNode[] {
+  const positions = createClusterLayout(
+    questions.map((question) => question.id),
+  );
   return questions.map((question, index) => {
     const spec = getGalaxySpec(question.id, index);
-    let position: THREE.Vector3;
-    if (questions.length <= 3)
-      position = new THREE.Vector3(
-        ...([
-          [-100, 12, 6],
-          [94, 83, -42],
-          [74, -97, -25],
-        ][index] as [number, number, number]),
-      );
-    else {
-      const angle = index * 2.399963 + 2.8;
-      const radius = 58 + Math.sqrt(index) * 85;
-      position = new THREE.Vector3(
-        Math.cos(angle) * radius,
-        Math.sin(angle) * radius * 0.67,
-        -18 - (index % 3) * 28,
-      );
-    }
+    const position = positions[index];
+    const rotation = new THREE.Quaternion().setFromEuler(spec.rotation);
     return {
       question,
       spec,
       position,
-      answers: question.answers.map((answer, answerIndex) => ({
-        answer,
-        position: answerLocalPosition(
+      rotation,
+      answers: question.answers.map((answer, answerIndex) => {
+        const localPosition = answerLocalPosition(
           spec,
           answerIndex,
           question.answers.length,
-        )
-          .applyEuler(spec.rotation)
-          .add(position),
-      })),
+        );
+        return {
+          answer,
+          localPosition,
+          position: localPosition
+            .clone()
+            .applyQuaternion(rotation)
+            .add(position),
+        };
+      }),
     };
   });
 }
@@ -203,6 +204,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     pitch: number;
     pan: THREE.Vector3;
   } | null>(null);
+  const rotationMemory = useRef(new Map<string, number>());
   const layerKey = `${stage}:${stage ? selectedQuestion?.id : props.questions.map((question) => question.id).join(",")}:${stage === 2 ? selectedAnswer?.id : ""}`;
   const count =
     stage === 1
@@ -290,12 +292,15 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const camera = new THREE.PerspectiveCamera(48, width / height, 0.06, 4000);
     const texture = glowTexture();
     const galaxyModels = new Map<string, ReturnType<typeof createGalaxy>>();
-    const answerStars = new Map<
-      string,
-      { group: THREE.Group; core: THREE.Mesh; glow: THREE.Sprite }
-    >();
+    const answerStars = new Map<string, ReturnType<typeof createStar>>();
     let system: PlanetarySystem | null = null,
       systemKey = "";
+    let comets: ReturnType<typeof createCometField> | null = null;
+    let cometKey = "";
+    let previousPaused: boolean | undefined;
+    const spinAxis = new THREE.Vector3(0, 0, 1);
+    const spinRotation = new THREE.Quaternion();
+    const cometTilt = new THREE.Quaternion().setFromAxisAngle(spinAxis, -0.65);
     let frame = 0,
       destroyed = false,
       contextLost = false,
@@ -383,34 +388,14 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       scene.add(model.group);
       galaxyModels.set(node.question.id, model);
       node.answers.forEach(({ answer, position }) => {
-        const color = new THREE.Color(node.question.color).lerp(
-          new THREE.Color("#ffe8bc"),
-          0.34,
-        );
-        const group = new THREE.Group();
-        group.position.copy(position);
-        const core = new THREE.Mesh(
-          new THREE.SphereGeometry(
-            0.34 + relevance(answer.relevance) * 0.19,
-            16,
-            12,
-          ),
-          new THREE.MeshBasicMaterial({ color: "#fff2d8", transparent: true }),
-        );
-        const glow = new THREE.Sprite(
-          new THREE.SpriteMaterial({
-            map: texture,
-            color,
-            transparent: true,
-            opacity: 0.9,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending,
-          }),
-        );
-        glow.scale.setScalar(7 + relevance(answer.relevance) * 5);
-        group.add(core, glow);
-        scene.add(group);
-        answerStars.set(answer.id, { group, core, glow });
+        const star = createStar({
+          seed: answer.id,
+          radius: 0.4 + relevance(answer.relevance) * 0.22,
+          mobile,
+        });
+        star.group.position.copy(position);
+        scene.add(star.group);
+        answerStars.set(answer.id, star);
       });
     });
     const network = new THREE.Group();
@@ -729,7 +714,34 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       const latest = propsRef.current,
         depth = clamp(latest.depth, 0, 2),
         level = stageAt(depth);
-      if (!latest.reducedMotion) elapsed += dt;
+      const reading =
+        pointers.size > 0 ||
+        isTyping(document.activeElement) ||
+        !!document.querySelector('[role="dialog"]') ||
+        !!container.querySelector(
+          ".galaxy-label:hover,.galaxy-label:focus-within,.galaxy-hub:hover,.galaxy-hub:focus-within",
+        );
+      const paused = reading || latest.reducedMotion;
+      if (!paused) elapsed += dt;
+      // Only the individual galaxy turns. Its center stays fixed in the cluster,
+      // and every answer uses the exact same local-to-world rotation as the arms.
+      layout.forEach((node) => {
+        const model = galaxyModels.get(node.question.id)!;
+        let angle = rotationMemory.current.get(node.question.id) ?? 0;
+        if (!paused)
+          angle += dt * (node.spec.kind === "elliptical" ? 0.0012 : 0.0022);
+        rotationMemory.current.set(node.question.id, angle);
+        model.group.quaternion
+          .copy(node.rotation)
+          .multiply(spinRotation.setFromAxisAngle(spinAxis, angle));
+        node.answers.forEach((body) => {
+          body.position
+            .copy(body.localPosition)
+            .applyQuaternion(model.group.quaternion)
+            .add(node.position);
+          answerStars.get(body.answer.id)!.group.position.copy(body.position);
+        });
+      });
       const { q, a } = focus();
       if (
         latest.resetToken !== previousReset ||
@@ -751,20 +763,13 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       }
       const inward = smooth(depth),
         intimate = smooth(depth - 1);
-      const safeAspect = Math.min(camera.aspect, 1.5);
       const extent = Math.max(
-        ...layout.map(
-          (node) =>
-            Math.max(
-              Math.abs(node.position.x) / safeAspect,
-              Math.abs(node.position.y),
-            ) + node.spec.radius,
-        ),
+        ...layout.map((node) => node.position.length() + node.spec.radius),
       );
-      const farRadius = Math.max(
-        320,
-        (extent / Math.tan(THREE.MathUtils.degToRad(24))) * 1.1,
+      const halfField = Math.atan(
+        Math.tan(THREE.MathUtils.degToRad(24)) * Math.min(1, camera.aspect),
       );
+      const farRadius = Math.max(320, (extent / Math.sin(halfField)) * 1.05);
       const galaxyRadius = 150 * Math.max(1, 0.95 / camera.aspect);
       const stellarRadius = 38 * Math.max(1, 0.96 / camera.aspect);
       modelRadius = THREE.MathUtils.lerp(
@@ -817,15 +822,37 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       syncPlanets(depth);
       if (system) {
         system.setOpacity(smooth((depth - 1.25) / 0.6));
-        system.update(
-          elapsed,
-          latest.reducedMotion,
-          pointers.size > 0 ||
-            !!container.querySelector(
-              ".galaxy-label:hover,.galaxy-label:focus-within",
-            ) ||
-            !!document.querySelector('[role="dialog"]'),
-        );
+        system.update(elapsed, latest.reducedMotion, paused);
+      }
+      if (level > 0) {
+        const seed = level === 2 && a ? a.answer.id : q.question.id;
+        const nextCometKey = `${level}:${seed}`;
+        if (cometKey !== nextCometKey) {
+          if (comets) {
+            scene.remove(comets.group);
+            comets.dispose();
+          }
+          comets = createCometField({
+            seed,
+            scale: level === 2 ? 17 : q.spec.radius * 1.1,
+            mobile,
+          });
+          scene.add(comets.group);
+          cometKey = nextCometKey;
+        }
+        comets!.group.position.copy(level === 2 && a ? a.position : q.position);
+        if (level === 2 && system)
+          comets!.group.quaternion.copy(system.group.quaternion);
+        else
+          comets!.group.quaternion.copy(
+            galaxyModels.get(q.question.id)!.group.quaternion,
+          );
+        comets!.group.quaternion.multiply(cometTilt);
+        comets!.update(elapsed, latest.reducedMotion, paused);
+        comets!.setOpacity(latest.reducedMotion ? 0 : level === 2 ? 0.48 : 0.5);
+      } else if (comets) {
+        comets.update(elapsed, latest.reducedMotion, true);
+        comets.setOpacity(0);
       }
       layout.forEach((node) => {
         const chosen = node.question.id === q.question.id;
@@ -838,15 +865,25 @@ export default function GalaxyScene(props: GalaxySceneProps) {
           ?.update(elapsed, latest.reducedMotion);
         node.answers.forEach(({ answer }) => {
           const star = answerStars.get(answer.id)!;
-          star.group.visible = depth < 1.68 || answer.id !== a?.answer.id;
           const opacity = chosen
             ? (0.48 + inward * 0.52) * (1 - intimate * 0.96)
             : 0.3 * (1 - inward);
-          (star.core.material as THREE.MeshBasicMaterial).opacity = opacity;
-          star.glow.material.opacity =
-            opacity * (0.4 + relevance(answer.relevance) * 0.6);
+          star.setOpacity(
+            depth >= 1.68 && answer.id === a?.answer.id
+              ? 0
+              : opacity * (0.55 + relevance(answer.relevance) * 0.45),
+          );
+          star.update(elapsed, latest.reducedMotion, paused);
         });
       });
+      container.dataset.motionPaused = String(paused);
+      if (level > 0)
+        container.dataset.starKind = a ? getStarStyle(a.answer.id).kind : "";
+      if (projectionTick % 15 === 0 || previousPaused !== paused)
+        container.dataset.galaxyRotation = (
+          rotationMemory.current.get(q.question.id) ?? 0
+        ).toFixed(6);
+      previousPaused = paused;
       networkMaterial.opacity = 0.11 * (1 - inward);
       trails.material.opacity =
         latest.flightMode && !latest.reducedMotion ? movement * 0.08 : 0;
@@ -1053,6 +1090,14 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         scene.remove(model.group);
         model.dispose();
       });
+      answerStars.forEach((star) => {
+        scene.remove(star.group);
+        star.dispose();
+      });
+      if (comets) {
+        scene.remove(comets.group);
+        comets.dispose();
+      }
       if (system) {
         scene.remove(system.group);
         system.dispose();
@@ -1211,6 +1256,11 @@ export default function GalaxyScene(props: GalaxySceneProps) {
                     if (!exiting) hubRef.current = element;
                   }}
                   className={`galaxy-hub ${layer.stage === 2 ? "galaxy-hub-article" : ""}`}
+                  data-star-kind={
+                    layer.stage === 2 && answer
+                      ? getStarStyle(answer.id).kind
+                      : undefined
+                  }
                   style={
                     {
                       "--galaxy-star-color": question.color,
@@ -1357,6 +1407,11 @@ export default function GalaxyScene(props: GalaxySceneProps) {
                             a!.id,
                             page * pageSizeRef.current + index,
                           )
+                        : undefined
+                    }
+                    data-star-kind={
+                      !isQuestion && !isParagraph && a
+                        ? getStarStyle(a.id).kind
                         : undefined
                     }
                     ref={(element) => {
