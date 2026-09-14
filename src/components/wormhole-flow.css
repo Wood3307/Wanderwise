@@ -1,0 +1,4 @@
+.wormhole-flow { position: absolute; inset: 0; pointer-events: none; z-index: 35; }
+.wormhole-flow > * { pointer-events: auto; }
+.app:not([data-wormhole="idle"]) > .interface { visibility: hidden; }
+.app:is([data-wormhole="entering"], [data-wormhole="space"], [data-wormhole="departing"]) > :is(.universe, .universe-vignette) { visibility: hidden; }

@@ -6,12 +6,17 @@ import { sourceLiterals, sourcePrefix } from './source-format.js';
 
 const PUBLIC_BASE = 'https://api.zhihu.com/km-indep-home/hackathon/v2/knowledge';
 const SEARCH_URL = 'https://developer.zhihu.com/api/v1/content/zhihu_search';
+const HOT_URL = 'https://developer.zhihu.com/api/v1/content/hot_list';
 const PALETTE = ['#89baff', '#b2a2ff', '#6ee4d3', '#ffc28e', '#e6a0d7', '#9dd8ff'];
 const STOP_WORDS = new Set('如何 怎么 怎样 为什么 什么 哪些 这个 那个 我们 你们 他们 一个 一些 可以 应该 需要 以及 还是 进行 通过 自己 时候 但是 就是 现在 有什么 有没有 怎么样 更好 起来 是否 不同 问题 话题 探索 发现 知识 的 了 和 与 在 是 吗 呢 地 得 不 很 更 最 对 把 被'.split(' '));
 const MAX_RESPONSE_BYTES = 1_500_000;
 const SEARCH_CACHE_MS = 5 * 60_000;
 const SEARCH_INTERVAL_MS = 1100;
 const SEARCH_LIMIT_COOLDOWN_MS = 60_000;
+const HOT_CACHE_MS = 5 * 60_000;
+const HOT_STALE_MS = 30 * 60_000;
+const HOT_QUESTION_MS = 2 * 60 * 60_000;
+const HOT_RETRY_MS = 60_000;
 
 export interface PublicItem {
   work_id: string;
@@ -43,6 +48,12 @@ export interface SearchItem {
   AuthorName?: string;
   VoteUpCount?: number;
   RankingScore?: number;
+}
+export interface HotItem {
+  Title?: string;
+  Url?: string;
+  Summary?: string;
+  ThumbnailUrl?: string;
 }
 
 /** Only these safe, application-owned messages may cross the API boundary. */
@@ -330,6 +341,28 @@ export function adaptSearch(items: SearchItem[], query: string): Question[] {
   return [...groups.values()].sort((a, b) => b.relevance - a.relevance);
 }
 
+/** A hot-list summary describes a question; it is never an answer or an author. */
+export function adaptHot(items: HotItem[]): Question[] {
+  const seen = new Set<string>();
+  return items.slice(0, 30).flatMap((item, index): Question[] => {
+    if (!item || typeof item !== 'object') return [];
+    const title = sourcePrefix(sourceTitle(item.Title), 400);
+    const url = safeZhihuUrl(item.Url);
+    if (!title || !url) return [];
+    const parsed = new URL(url);
+    const id = parsed.pathname.match(/^\/question\/([0-9]{1,30})\/?$/)?.[1];
+    if (!id || !['zhihu.com', 'www.zhihu.com'].includes(parsed.hostname) || seen.has(id)) return [];
+    seen.add(id);
+    return [{
+      id: `question-${id}`, title, url: `https://www.zhihu.com/question/${id}`,
+      excerpt: sourcePrefix(plainText(item.Summary), 300, 600),
+      keywords: extractKeywords(title).slice(0, 4),
+      relevance: Math.max(0.36, 1 - index * 0.045), color: PALETTE[(seen.size - 1) % PALETTE.length],
+      kind: 'question', answers: [], answersExpanded: false, hotRank: index + 1,
+    }];
+  }).slice(0, 12);
+}
+
 export function adaptPublicAnswer(item: PublicItem, detail?: PublicDetail, query = ''): Answer {
   const title = sourcePrefix(plainText(detail?.chapter_name || item.title), 400) || '未提供标题';
   const content = sourcePrefix(plainText(detail?.content, true), 20000);
@@ -442,6 +475,11 @@ export class ZhihuService {
   private pendingDetails = new Map<string, Promise<Answer>>();
   private refreshPromise?: Promise<void>;
   private refreshAttemptAt = -Infinity;
+  private hotCache?: { at: number; response: ExploreResponse };
+  private pendingHot?: Promise<ExploreResponse>;
+  private hotAttemptAt = -Infinity;
+  private hotError?: ApiError;
+  private hotQuestions = new Map<string, { at: number; question: Question }>();
   public publicError?: ApiError;
 
   constructor(options: ZhihuServiceOptions) {
@@ -458,7 +496,7 @@ export class ZhihuService {
 
   private async fetchJson(url: string, authenticated = false): Promise<unknown> {
     const parsed = new URL(url);
-    if (!(url === SEARCH_URL || (parsed.origin === 'https://developer.zhihu.com' && parsed.pathname === '/api/v1/content/zhihu_search') || (parsed.origin === 'https://api.zhihu.com' && /^\/km-indep-home\/hackathon\/v2\/knowledge\/(?:list|[0-9]{1,30})$/.test(parsed.pathname)))) {
+    if (!((parsed.origin === 'https://developer.zhihu.com' && ['/api/v1/content/zhihu_search', '/api/v1/content/hot_list'].includes(parsed.pathname)) || (parsed.origin === 'https://api.zhihu.com' && /^\/km-indep-home\/hackathon\/v2\/knowledge\/(?:list|[0-9]{1,30})$/.test(parsed.pathname)))) {
       throw new ApiError(400, 'INVALID_SOURCE', '不支持的知乎内容来源。');
     }
     const headers: Record<string, string> = { Accept: 'application/json' };
@@ -499,8 +537,10 @@ export class ZhihuService {
     return { query, keywords: extractKeywords(query), questions, source: this.source, notice, fetchedAt: this.snapshot.fetchedAt };
   }
 
-  async explore(query: string): Promise<ExploreResponse> {
-    if (!this.secret || !query) return this.publicExplore(query);
+  async explore(query: string, mode?: 'public'): Promise<ExploreResponse> {
+    if (mode === 'public') return this.publicExplore(query);
+    if (!query) return this.hotExplore();
+    if (!this.secret) return this.publicExplore(query);
     const existing = this.cache.get(query);
     if (existing && this.now() - existing.at < SEARCH_CACHE_MS) return existing.response;
     const pending = this.pendingSearches.get(query);
@@ -509,6 +549,72 @@ export class ZhihuService {
     const task = this.search(query).finally(() => this.pendingSearches.delete(query));
     this.pendingSearches.set(query, task);
     return task;
+  }
+
+  private rememberedHotQuestion(id: string): Question | undefined {
+    const now = this.now();
+    for (const [key, entry] of this.hotQuestions) {
+      if (now - entry.at >= HOT_QUESTION_MS) this.hotQuestions.delete(key);
+    }
+    return this.hotQuestions.get(id)?.question;
+  }
+
+  private rememberHotQuestions(questions: Question[]) {
+    this.rememberedHotQuestion('');
+    for (const question of questions) {
+      const existing = this.hotQuestions.get(question.id)?.question;
+      this.hotQuestions.delete(question.id);
+      if (this.hotQuestions.size >= 200) this.hotQuestions.delete(this.hotQuestions.keys().next().value!);
+      this.hotQuestions.set(question.id, {
+        at: this.now(),
+        question: existing?.answersExpanded ? { ...question, answers: existing.answers, answersExpanded: true } : question,
+      });
+    }
+  }
+
+  private staleHot(error: ApiError): ExploreResponse {
+    if (this.hotCache && this.now() - this.hotCache.at < HOT_STALE_MS) {
+      return { ...this.hotCache.response, stale: true, notice: `当前暂时无法更新知乎热榜，展示上次成功获取的热点（获取时间 ${this.hotCache.response.fetchedAt}）。${error.message}` };
+    }
+    throw error;
+  }
+
+  private async hotExplore(): Promise<ExploreResponse> {
+    if (!this.secret) throw new ApiError(503, 'ZHIHU_NOT_CONFIGURED', '尚未配置知乎 Access Secret，暂时无法读取当前热点。');
+    if (this.hotCache && this.now() - this.hotCache.at < HOT_CACHE_MS) return this.hotCache.response;
+    if (this.pendingHot) return this.pendingHot;
+    // A failed hot-list fetch is paced separately from answer searches.
+    if (this.hotError && this.now() - this.hotAttemptAt < HOT_RETRY_MS) return this.staleHot(this.hotError);
+    this.hotAttemptAt = this.now();
+    const task = this.fetchHot().catch((error: unknown) => {
+      this.hotError = error instanceof ApiError ? error : new ApiError(502, 'ZHIHU_HOT_FAILED', '知乎热榜暂时未能获取，请稍后重试。');
+      return this.staleHot(this.hotError);
+    }).finally(() => { this.pendingHot = undefined; });
+    this.pendingHot = task;
+    return task;
+  }
+
+  private async fetchHot(): Promise<ExploreResponse> {
+    const raw = await this.fetchJson(`${HOT_URL}?Limit=20`, true);
+    if (!raw || typeof raw !== 'object') throw new ApiError(502, 'UPSTREAM_INVALID_RESPONSE', '知乎热榜返回了无法识别的数据。');
+    const payload = raw as { Code?: number; Data?: { Items?: HotItem[] } };
+    if (payload.Code !== 0) {
+      if (payload.Code === 20001) throw new ApiError(502, 'ZHIHU_AUTH_FAILED', '知乎热榜鉴权失败，请检查服务端的 Access Secret 配置。');
+      if (payload.Code === 30001) throw new ApiError(429, 'ZHIHU_RATE_LIMITED', '知乎热榜额度或频率已受限，请稍后再试。');
+      throw new ApiError(502, 'ZHIHU_HOT_FAILED', '知乎热榜暂时未能获取，请稍后重试。');
+    }
+    if (!Array.isArray(payload.Data?.Items)) throw new ApiError(502, 'UPSTREAM_INVALID_RESPONSE', '知乎热榜返回了无法识别的数据。');
+    const questions = adaptHot(payload.Data.Items);
+    const response: ExploreResponse = {
+      query: '', keywords: [], questions, source: 'zhihu-hot', fetchedAt: new Date(this.now()).toISOString(),
+      notice: questions.length
+        ? '来自知乎当前热榜，按原榜顺序展示问题。进入星系后检索同一问题下的回答，热榜摘要不会作为回答。'
+        : '知乎当前热榜未返回可展示的问题，可尝试搜索感兴趣的话题。',
+    };
+    this.hotCache = { at: this.now(), response };
+    this.hotError = undefined;
+    this.rememberHotQuestions(questions);
+    return response;
   }
 
   private scheduleSearch(task: () => Promise<SearchItem[]>): Promise<SearchItem[]> {
@@ -565,12 +671,28 @@ export class ZhihuService {
     return response;
   }
 
+  private async locateQuestion(questionId: string, query: string): Promise<{ question?: Question; source: SourceMode; exploration?: ExploreResponse }> {
+    // Explicit public browsing and legacy saved public works remain independent
+    // of hot-list availability and never consume an authenticated request.
+    if (/^(?:topic-|knowledge-)/.test(questionId)) {
+      const exploration = this.publicExplore(query);
+      const question = exploration.questions.find((entry) => entry.id === questionId
+        || (questionId.startsWith('knowledge-') && entry.answers.some((answer) => answer.id === questionId)));
+      return { question, source: exploration.source, exploration };
+    }
+    if (!query) {
+      const question = this.rememberedHotQuestion(questionId);
+      if (question) return { question, source: 'zhihu-hot' };
+    }
+    const exploration = await this.explore(query);
+    return { question: exploration.questions.find((entry) => entry.id === questionId), source: exploration.source, exploration };
+  }
+
   async question(questionId: string, query: string): Promise<QuestionResponse> {
     if (!validNodeId(questionId)) throw new ApiError(400, 'INVALID_QUESTION_ID', '问题编号格式无效。');
-    const exploration = await this.explore(query);
-    const question = exploration.questions.find((entry) => entry.id === questionId);
+    const { question, source, exploration } = await this.locateQuestion(questionId, query);
     if (!question) throw new ApiError(404, 'QUESTION_NOT_FOUND', '未找到该问题，请从本次探索结果中选择。');
-    if (exploration.source !== 'zhihu-search' || question.kind !== 'question') {
+    if (!['zhihu-search', 'zhihu-hot'].includes(source) || question.kind !== 'question') {
       return { question, ...(question.kind === 'topic' ? { notice: '此星系为主题聚合，各作品保留独立原题与作者，并非同一知乎问题下的回答。' } : {}) };
     }
     const key = `${query}\n${questionId}`;
@@ -583,8 +705,13 @@ export class ZhihuService {
       if (this.expandedQuestions.size >= 200) this.expandedQuestions.delete(this.expandedQuestions.keys().next().value!);
       this.expandedQuestions.set(key, { at: this.now(), response });
       // Keep known-answer lookups and repeated exploration in sync with the expanded question.
-      const index = exploration.questions.findIndex((entry) => entry.id === questionId);
-      if (index >= 0) exploration.questions[index] = response.question;
+      const activeExploration = exploration ?? (source === 'zhihu-hot' ? this.hotCache?.response : undefined);
+      const index = activeExploration?.questions.findIndex((entry) => entry.id === questionId) ?? -1;
+      if (activeExploration && index >= 0) activeExploration.questions[index] = response.question;
+      if (source === 'zhihu-hot') {
+        const remembered = this.hotQuestions.get(questionId);
+        if (remembered) remembered.question = response.question;
+      }
       return response;
     }).finally(() => this.pendingQuestions.delete(key));
     this.pendingQuestions.set(key, task);
@@ -603,6 +730,7 @@ export class ZhihuService {
     const matching = records.filter((record) => {
       if (targetQuestionId && record.questionId) return record.questionId === targetQuestionId;
       if (normalizedTitle(record.title) !== targetTitle) return false;
+      if (question.hotRank && targetQuestionId) return titleIds.size === 0 || (titleIds.size === 1 && titleIds.has(targetQuestionId));
       return Boolean(targetQuestionId) || !record.questionId || titleIds.size <= 1;
     });
     const additions = adaptSearch(matching.map((record) => record.item), query).flatMap((entry) => entry.answers);
@@ -623,11 +751,10 @@ export class ZhihuService {
 
   async findAnswer(answerId: string, questionId: string, query: string): Promise<Answer> {
     if (!validNodeId(answerId) || !validNodeId(questionId)) throw new ApiError(400, 'INVALID_ANSWER_ID', '内容编号格式无效。');
-    const exploration = await this.explore(query);
-    const question = exploration.questions.find((entry) => entry.id === questionId);
+    const { question, source } = await this.locateQuestion(questionId, query);
     const key = `${query}\n${questionId}`;
     const cached = this.expandedQuestions.get(key);
-    const expanded = cached && this.now() - cached.at < SEARCH_CACHE_MS ? cached.response.question : undefined;
+    const expanded = cached && this.now() - cached.at < (source === 'zhihu-hot' ? HOT_QUESTION_MS : SEARCH_CACHE_MS) ? cached.response.question : undefined;
     const answer = question && (expanded ?? question).answers.find((entry) => entry.id === answerId);
     if (!answer) throw new ApiError(404, 'ANSWER_NOT_FOUND', '未找到该文章，请从本次探索的问题中选择。');
     return answer;

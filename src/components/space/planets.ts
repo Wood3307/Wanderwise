@@ -16,6 +16,7 @@ export interface ParagraphPlanet {
   index: number;
   kind: PlanetKind;
   object: THREE.Group;
+  orbit: THREE.LineLoop;
   /** The actual anchor, not a snapshot: it is also object.position. */
   position: THREE.Vector3;
   radius: number;
@@ -570,7 +571,6 @@ export function createPlanetarySystem(options: {
     const phase = random() * 0.7 - 0.35;
     positionOnOrbit(object.position, angle, orbitRadius, inclination, phase);
     group.add(object);
-    planets.push({ index, kind, object, position: object.position, radius });
     motions.push({
       angle,
       orbitRadius,
@@ -607,6 +607,7 @@ export function createPlanetarySystem(options: {
     );
     orbit.name = `planet-orbit-${index}`;
     group.add(orbit);
+    planets.push({ index, kind, object, orbit, position: object.position, radius });
   }
 
   let lastTime: number | undefined;

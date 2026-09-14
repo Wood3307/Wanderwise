@@ -1,12 +1,12 @@
 import type { JourneyStop, Reflection, SavedItem } from '../types';
+import { loadCurrentJourney, saveCurrentJourney } from './trip';
 
 const KEYS = {
   collection: 'wanderwise.collection.v1',
   reflections: 'wanderwise.reflections.v1',
-  journey: 'wanderwise.journey.v1',
 } as const;
 
-const MAX_RECORDS = { collection: 500, reflections: 500, journey: 1000 } as const;
+const MAX_RECORDS = { collection: 500, reflections: 500 } as const;
 const MAX_STORAGE_LENGTH = 4_000_000;
 type RecordValidator<T> = (value: unknown) => T | undefined;
 
@@ -78,23 +78,6 @@ const reflection: RecordValidator<Reflection> = (value) => {
   };
 };
 
-const journeyStop: RecordValidator<JourneyStop> = (value) => {
-  const item = record(value);
-  if (!item || !text(item.id, 512) || !text(item.title, 2000)
-    || (item.type !== 'question' && item.type !== 'answer') || !text(item.questionId, 512)
-    || !optionalText(item.answerId, 512) || !text(item.query, 300, true)
-    || !timestamp(item.visitedAt)) return undefined;
-  return {
-    id: item.id,
-    title: item.title,
-    type: item.type,
-    questionId: item.questionId,
-    query: item.query,
-    visitedAt: item.visitedAt,
-    ...(item.answerId !== undefined ? { answerId: item.answerId } : {}),
-  };
-};
-
 function read<T extends { id: string }>(key: string, limit: number, validate: RecordValidator<T>, identity: (item: T) => string = item => item.id): T[] {
   try {
     const raw = window.localStorage.getItem(key);
@@ -143,8 +126,8 @@ export const loadCollection = (): SavedItem[] => read(KEYS.collection, MAX_RECOR
 export const saveCollection = (items: SavedItem[]): boolean => write(KEYS.collection, items, MAX_RECORDS.collection, savedItem, savedIdentity);
 export const loadReflections = (): Reflection[] => read(KEYS.reflections, MAX_RECORDS.reflections, reflection);
 export const saveReflections = (items: Reflection[]): boolean => write(KEYS.reflections, items, MAX_RECORDS.reflections, reflection);
-export const loadJourney = (): JourneyStop[] => read(KEYS.journey, MAX_RECORDS.journey, journeyStop);
-export const saveJourney = (items: JourneyStop[]): boolean => write(KEYS.journey, items, MAX_RECORDS.journey, journeyStop);
+export const loadJourney = loadCurrentJourney;
+export const saveJourney = saveCurrentJourney;
 
 function markdown(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -162,7 +145,7 @@ export function exportNotebook(collection: SavedItem[], reflections: Reflection[
     '',
     `导出时间：${new Date().toISOString()}`,
     '',
-    '这份手记记录本机保存的知乎内容摘录、你写下的思考和探索足迹。摘录不等于原文全文，请通过来源链接阅读原文。',
+    '这份手记记录本机保存的知乎内容摘录、你写下的思考和本次旅行的探索足迹。摘录不等于原文全文，请通过来源链接阅读原文。',
     '',
     '## 知识行囊',
     '',

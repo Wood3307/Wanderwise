@@ -20,6 +20,8 @@ Wanderwise 的 `src/components/GalaxyScene.tsx` 是独立编写的现代 Three.j
 
 `public/textures/cosmic-observatory-v3.webp` 使用内置 `image_gen.imagegen` 生成。用户提供的三张宇宙图片作为题材、色彩和氛围参考，未直接复制到应用中。完整提示词、生成方式及格式压缩记录见 [COSMIC_ART_DIRECTION.md](docs/COSMIC_ART_DIRECTION.md)。
 
+平行宇宙背景使用 ESA/Hubble 的 [New view of the Pillars of Creation — visible](https://esahubble.org/images/heic1501a/)，署名为 **NASA, ESA/Hubble and the Hubble Heritage Team**，按 [CC BY 4.0 与发布方使用条款](https://esahubble.org/copyright/)使用。源文件保持原样，界面仅使用 CSS 缩放和压暗；完整出处见 [PARALLEL_BACKGROUND.md](docs/PARALLEL_BACKGROUND.md)。
+
 ## 字体资源
 
 - Noto Sans SC：Google / Adobe，SIL Open Font License 1.1。许可证随文件位于 `public/fonts/OFL-NotoSansSC.txt`。

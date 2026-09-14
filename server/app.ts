@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ApiError, ZhihuService } from './zhihu.js';
 import { enrichHighlights, getModelStatus } from './highlights.js';
+import { AssociationService, configuredAssociationModel } from './associations.js';
 
 function exploreQuery(raw: unknown): string {
   if (raw !== undefined && typeof raw !== 'string') throw new ApiError(400, 'INVALID_QUERY', '请提供单个探索问题。');
@@ -12,7 +13,7 @@ function exploreQuery(raw: unknown): string {
   return query;
 }
 
-export function createApp(service: ZhihuService, options: { distDir?: string; refreshPublic?: boolean } = {}) {
+export function createApp(service: ZhihuService, options: { distDir?: string; refreshPublic?: boolean; associations?: AssociationService } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('query parser', 'simple');
@@ -43,11 +44,23 @@ export function createApp(service: ZhihuService, options: { distDir?: string; re
   app.get('/api/health', (_request, response) => {
     response.json({ ok: true, configured: service.configured, publicCount: service.publicCount, model: getModelStatus() });
   });
+  const associations = options.associations ?? new AssociationService({ model: configuredAssociationModel() });
+  app.post('/api/associations', express.json({ limit: '32kb', strict: true }), async (request, response, next) => {
+    try {
+      const origin = request.get('origin');
+      let sameHost = true;
+      if (origin) { try { sameHost = new URL(origin).host === request.get('host'); } catch { sameHost = false; } }
+      if (request.get('sec-fetch-site') === 'cross-site' || !sameHost) throw new ApiError(403, 'CROSS_ORIGIN_REQUEST', '请从当前项目页面发起操作。');
+      response.json(await associations.discover(request.body));
+    } catch (error) { next(error); }
+  });
   app.get('/api/explore', async (request, response, next) => {
     try {
       const query = exploreQuery(request.query.q);
-      if (options.refreshPublic !== false) void service.refreshPublic();
-      response.json(await service.explore(query));
+      const mode = request.query.mode;
+      if (mode !== undefined && mode !== 'public') throw new ApiError(400, 'INVALID_MODE', '请选择有效的探索来源。');
+      if (mode === 'public' && options.refreshPublic !== false) void service.refreshPublic();
+      response.json(await service.explore(query, mode));
     } catch (error) { next(error); }
   });
   app.get('/api/questions/:questionId', async (request, response, next) => {
@@ -74,7 +87,7 @@ export function createApp(service: ZhihuService, options: { distDir?: string; re
     app.get('*', (_request, response) => response.sendFile(resolve(distDir, 'index.html')));
   }
   const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
-    const safe = error instanceof ApiError ? error : new ApiError(500, 'INTERNAL_ERROR', '服务暂时无法完成请求，请稍后重试。');
+    const safe = error instanceof ApiError ? error : error?.type === 'entity.parse.failed' ? new ApiError(400, 'INVALID_JSON', '请求内容不是有效 JSON。') : error?.type === 'entity.too.large' ? new ApiError(413, 'BODY_TOO_LARGE', '提交的材料过长。') : new ApiError(500, 'INTERNAL_ERROR', '服务暂时无法完成请求，请稍后重试。');
     response.status(safe.status).json({ error: safe.code, message: safe.message, ...(safe.upstreamStatus ? { upstreamStatus: safe.upstreamStatus } : {}) });
   };
   app.use(errorHandler);

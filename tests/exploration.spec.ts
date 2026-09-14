@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 import type { Answer, ExploreResponse, Question, SavedItem } from '../src/types';
 
-const keys = { collection: 'wanderwise.collection.v1', reflections: 'wanderwise.reflections.v1', journey: 'wanderwise.journey.v1' };
+const keys = { collection: 'wanderwise.collection.v1', reflections: 'wanderwise.reflections.v1', journey: 'wanderwise.trip-session.v1' };
 // Explicit test fixtures: these are never shipped as real Zhihu content.
 const paragraphs = [
   '学习之前明确具体目标能够减少注意力切换，每次只安排一个能够独立完成的小任务。',
@@ -29,6 +29,9 @@ const discovery = (query = ''): ExploreResponse => ({ query, keywords: ['学习'
 const fulfill = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
 
 test.beforeEach(async ({ page }) => {
+  // These navigation tests deliberately reload/leave; the dedicated exit suite
+  // exercises cancelling the native warning and choosing whether to export.
+  page.on('dialog', dialog => dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss());
   await page.addInitScript(() => {
     if (!sessionStorage.getItem('wanderwise.e2e.initialized')) {
       for (const key of ['wanderwise.collection.v1', 'wanderwise.reflections.v1', 'wanderwise.journey.v1']) localStorage.removeItem(key);
@@ -101,6 +104,7 @@ async function openBag(page: Page): Promise<void> {
   await expect(page.getByRole('dialog', { name: '知识行囊', exact: true })).toBeVisible();
 }
 async function stored(page: Page, key: string): Promise<unknown[]> {
+  if (key === keys.journey) return page.evaluate(storageKey => JSON.parse(sessionStorage.getItem(storageKey) || '{}').journey ?? [], key);
   return page.evaluate(storageKey => JSON.parse(localStorage.getItem(storageKey) || '[]'), key);
 }
 
@@ -185,7 +189,7 @@ async function expectAnchoredDrag(page: Page, label: Locator) {
 }
 
 test('real public discovery groups ten traceable works into topics with multiple orbiting articles', async ({ page, request }) => {
-  const response = await request.get('/api/explore?q=');
+  const response = await request.get('/api/explore?q=&mode=public');
   expect(response.ok()).toBe(true);
   const corpus = await response.json() as ExploreResponse;
   expect(corpus.questions.length).toBe(3);
@@ -354,7 +358,7 @@ test('a question without answers stays in its orbit and supports reflection', as
   await arrive(page);
   await active(page).getByRole('button', { name: `进入星系：${question.title}` }).click();
   await expect(page.locator('.galaxy-scene')).toHaveAttribute('data-depth', '1');
-  await expect(active(page).locator('.galaxy-hub-meta')).toHaveText('0 个回答 · 棒旋星系');
+  await expect(active(page).locator('.galaxy-hub-meta')).toHaveText('0 个回答');
   await expect(active(page).getByRole('button', { name: /^阅读观点：/ })).toHaveCount(0);
   await page.locator('.galaxy-canvas').dispatchEvent('wheel', { deltaY: -1600 });
   await page.keyboard.press('Enter');
@@ -394,6 +398,8 @@ test('saved navigation across queries synchronizes search and observatory return
     event.preventDefault(); Reflect.set(window, '__e2eReturnQuery', (event as CustomEvent<{ query: string }>).detail.query);
   }));
   await page.getByRole('button', { name: '返回占星台', exact: true }).click();
+  await page.getByRole('dialog', { name: '是否导出漫游足迹', exact: true })
+    .getByRole('button', { name: '导出并返回占星台', exact: true }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__e2eReturnQuery'))).toBe('学习');
 });
 

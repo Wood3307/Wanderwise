@@ -22,10 +22,12 @@ const journey: JourneyStop = {
 };
 
 let values: Map<string, string>;
+let sessionValues: Map<string, string>;
 let originalWindow: PropertyDescriptor | undefined;
 
 beforeEach(() => {
   values = new Map();
+  sessionValues = new Map();
   originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -33,6 +35,10 @@ beforeEach(() => {
       localStorage: {
         getItem: (key: string) => values.get(key) ?? null,
         setItem: (key: string, value: string) => { values.set(key, value); },
+      },
+      sessionStorage: {
+        getItem: (key: string) => sessionValues.get(key) ?? null,
+        setItem: (key: string, value: string) => { sessionValues.set(key, value); },
       },
     },
   });
@@ -43,13 +49,15 @@ afterEach(() => {
   else Reflect.deleteProperty(globalThis, 'window');
 });
 
-test('collection, reflections and journey survive a storage roundtrip', () => {
+test('collection and reflections persist locally while only the current trip persists in this tab', () => {
   assert.equal(saveCollection([collection]), true);
   assert.equal(saveReflections([reflection]), true);
   assert.equal(saveJourney([journey]), true);
   assert.deepEqual(loadCollection(), [collection]);
   assert.deepEqual(loadReflections(), [reflection]);
   assert.deepEqual(loadJourney(), [journey]);
+  assert.equal(values.has('wanderwise.journey.v1'), false);
+  assert.equal(sessionValues.has('wanderwise.trip-session.v1'), true);
 });
 
 test('corrupt JSON and malformed record schemas cannot break notebook loading', () => {
@@ -65,7 +73,8 @@ test('corrupt JSON and malformed record schemas cannot break notebook loading', 
   values.set('wanderwise.journey.v1', JSON.stringify([{ ...journey, visitedAt: 'invalid' }, journey]));
   assert.deepEqual(loadCollection(), [collection]);
   assert.deepEqual(loadReflections(), [reflection]);
-  assert.deepEqual(loadJourney(), [journey]);
+  assert.deepEqual(loadJourney(), []);
+  assert.ok(values.has('wanderwise.journey.v1'), 'legacy history is ignored, never destroyed');
 });
 
 test('unsafe source links are omitted while readable saved content is retained', () => {

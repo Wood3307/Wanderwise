@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import type { ObservatoryEntry } from '../types';
-import { getInitialEntry, registerObservatoryEntry, returnToObservatory } from './integration';
+import {
+  consumeJourneyExport, exportJourneyToObservatory, getInitialEntry, listJourneyExports,
+  registerObservatoryEntry, returnToObservatory,
+} from './integration';
+import { JOURNEY_EXPORT_PREFIX, type JourneyExportPacket } from './trip';
 
 class TestCustomEvent<T = unknown> extends Event {
   detail: T;
@@ -15,15 +19,24 @@ let previousWindow: PropertyDescriptor | undefined;
 let previousCustomEvent: PropertyDescriptor | undefined;
 let navigations: string[];
 let cleanup: (() => void) | undefined;
+let storage: Map<string, string>;
 
 beforeEach(() => {
   previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   previousCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
   navigations = [];
+  storage = new Map();
   const mock = Object.assign(new EventTarget(), {
     location: {
       href: 'https://wanderwise.test/explore', origin: 'https://wanderwise.test', search: '',
       assign: (url: string) => { navigations.push(url); },
+    },
+    localStorage: {
+      get length() { return storage.size; },
+      key: (index: number) => [...storage.keys()][index] ?? null,
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value); },
+      removeItem: (key: string) => { storage.delete(key); },
     },
   });
   Object.defineProperty(globalThis, 'window', { configurable: true, value: mock });
@@ -108,10 +121,104 @@ test('cleanup removes both listeners and restores the existing host bridge', () 
   const entries: ObservatoryEntry[] = [];
   cleanup = registerObservatoryEntry((entry) => entries.push(entry));
   assert.equal(window.Wanderwise.hostVersion, 2);
+  assert.equal(typeof window.Wanderwise.listJourneyExports, 'function');
   cleanup();
   cleanup = undefined;
   assert.equal(window.Wanderwise, originalBridge);
   post(window.location.origin, { type: 'wanderwise:enter', payload: { query: 'ignored' } });
   window.dispatchEvent(new CustomEvent('wanderwise:enter', { detail: { query: 'ignored' } }));
   assert.deepEqual(entries, []);
+});
+
+const packet: JourneyExportPacket = {
+  version: 1, tripId: 'trip-a', startedAt: '2026-09-14T08:00:00.000Z', endedAt: '2026-09-14T09:00:00.000Z',
+  query: '宇宙', journey: [{ id: 'visit-1', title: '引力如何影响时空？', questionId: '123', type: 'question',
+    query: '宇宙', visitedAt: '2026-09-14T08:30:00.000Z', url: 'https://www.zhihu.com/question/123' }],
+};
+
+test('explicit exports queue separately by trip ID, remain until consumed and never mix sessions', () => {
+  cleanup = registerObservatoryEntry(() => {});
+  const received: JourneyExportPacket[] = [];
+  window.addEventListener('wanderwise:journey-export', event => received.push((event as CustomEvent).detail));
+  assert.deepEqual(exportJourneyToObservatory(packet), { stored: true, acknowledged: false });
+  assert.deepEqual(exportJourneyToObservatory({ ...packet, tripId: 'trip-b', query: '另一趟旅行' }), { stored: true, acknowledged: false });
+  assert.equal(received.length, 2);
+  assert.equal(storage.size, 2);
+  assert.deepEqual(window.Wanderwise?.listJourneyExports?.().map(item => item.tripId), ['trip-a', 'trip-b']);
+  assert.deepEqual(window.Wanderwise?.consumeJourneyExport?.('trip-a'), packet);
+  assert.equal(consumeJourneyExport('trip-a'), undefined);
+  assert.deepEqual(listJourneyExports().map(item => item.tripId), ['trip-b']);
+  assert.ok(storage.has(`${JOURNEY_EXPORT_PREFIX}trip-b`));
+});
+
+test('acknowledgement requires actual host consumption; event observation alone is not receipt', () => {
+  cleanup = registerObservatoryEntry(() => {});
+  window.addEventListener('wanderwise:journey-export', event => {
+    const sent = (event as CustomEvent<JourneyExportPacket>).detail;
+    assert.deepEqual(window.Wanderwise?.consumeJourneyExport?.(sent.tripId), packet);
+  });
+  assert.deepEqual(exportJourneyToObservatory(packet), { stored: false, acknowledged: true });
+  assert.equal(storage.size, 0);
+});
+
+test('outbox validation rejects corrupt schemas, oversized entries and key/packet identity mismatch', () => {
+  storage.set(`${JOURNEY_EXPORT_PREFIX}bad`, '{bad JSON');
+  storage.set(`${JOURNEY_EXPORT_PREFIX}mismatch`, JSON.stringify(packet));
+  storage.set(`${JOURNEY_EXPORT_PREFIX}huge`, ' '.repeat(4_000_001));
+  storage.set(`${JOURNEY_EXPORT_PREFIX}trip-a`, JSON.stringify(packet));
+  storage.set('other-application', 'untouched');
+  assert.deepEqual(listJourneyExports(), [packet]);
+  assert.deepEqual(exportJourneyToObservatory({ ...packet, tripId: '../bad' }), { stored: false, acknowledged: false });
+  assert.equal(consumeJourneyExport('../bad'), undefined);
+  assert.deepEqual(consumeJourneyExport('trip-a'), packet);
+  assert.equal(storage.get('other-application'), 'untouched');
+});
+
+test('an active host can accept a memory-only export when persistence is blocked', () => {
+  cleanup = registerObservatoryEntry(() => {});
+  window.localStorage.setItem = () => { throw new Error('QuotaExceeded'); };
+  assert.deepEqual(exportJourneyToObservatory(packet), { stored: false, acknowledged: false });
+  assert.deepEqual(listJourneyExports(), [], 'failed attempts leave nothing a host can claim after discard');
+  window.addEventListener('wanderwise:journey-export-pending', event => {
+    const pending = (event as CustomEvent<{ version: 1; tripId: string }>).detail;
+    assert.deepEqual(Object.keys(pending).sort(), ['tripId', 'version']);
+    assert.equal(consumeJourneyExport(pending.tripId)?.tripId, 'trip-b');
+  });
+  assert.deepEqual(exportJourneyToObservatory({ ...packet, tripId: 'trip-b' }), { stored: false, acknowledged: true });
+  assert.deepEqual(listJourneyExports(), []);
+});
+
+test('a failed export does not broadcast content asynchronously or remain available for later consumption', async () => {
+  cleanup = registerObservatoryEntry(() => {});
+  window.localStorage.setItem = () => { throw new Error('QuotaExceeded'); };
+  window.addEventListener('wanderwise:journey-export', () => assert.fail('failed export broadcast full contents'));
+  Object.defineProperty(window, 'parent', { configurable: true, value: {
+    location: { origin: window.location.origin }, postMessage: () => assert.fail('failed export queued a message'),
+  } });
+  let laterClaim: Promise<JourneyExportPacket | undefined> | undefined;
+  window.addEventListener('wanderwise:journey-export-pending', event => {
+    const tripId = (event as CustomEvent<{ tripId: string }>).detail.tripId;
+    laterClaim = Promise.resolve().then(() => consumeJourneyExport(tripId));
+  });
+  assert.deepEqual(exportJourneyToObservatory(packet), { stored: false, acknowledged: false });
+  assert.equal(await laterClaim, undefined);
+  assert.deepEqual(listJourneyExports(), []);
+});
+
+test('another tab consuming an export removes it from the cached pending list', () => {
+  exportJourneyToObservatory(packet);
+  storage.delete(`${JOURNEY_EXPORT_PREFIX}trip-a`);
+  assert.deepEqual(listJourneyExports(), []);
+});
+
+test('same-origin parent/opener notifications include the packet and never target another origin', () => {
+  const messages: unknown[] = [];
+  Object.defineProperty(window, 'parent', { configurable: true, value: {
+    location: { origin: window.location.origin }, postMessage: (...args: unknown[]) => messages.push(args),
+  } });
+  Object.defineProperty(window, 'opener', { configurable: true, value: {
+    location: { origin: 'https://external.test' }, postMessage: () => assert.fail('external host received a journey'),
+  } });
+  assert.deepEqual(exportJourneyToObservatory(packet), { stored: true, acknowledged: false });
+  assert.deepEqual(messages, [[{ type: 'wanderwise:journey-export', payload: packet }, window.location.origin]]);
 });
