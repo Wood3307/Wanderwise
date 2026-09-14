@@ -30,7 +30,7 @@ const app = createApp(service, { distDir: fileURLToPath(new URL('../dist', impor
 const server = app.listen(port, host, () => {
   console.info(`Wanderwise · cabin, observatory and galaxy: http://${host}:${port}/observatory`);
   console.info(`Galaxy content: ${service.configured ? 'Zhihu search configured' : 'public knowledge mode'} (${service.publicCount} source works)`);
-  void service.refreshPublic();
+  // Public source refresh is requested explicitly; the initial sky uses hot topics.
 });
 server.requestTimeout = 15_000;
 server.headersTimeout = 10_000;

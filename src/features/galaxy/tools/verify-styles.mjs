@@ -8,7 +8,7 @@ import selectorParser from 'postcss-selector-parser'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const publicRoot = fileURLToPath(new URL('../../../../public/', import.meta.url))
 let selectorsChecked = 0, assetsChecked = 0, animationsChecked = 0
-for (const name of ['styles.css', 'fonts.css', 'components/galaxy.css', 'components/cosmic-backdrop.css', 'components/background-music.css', 'components/rich-text.css', 'components/search-voyage.css']) {
+for (const name of ['styles.css', 'fonts.css', 'components/galaxy.css', 'components/cosmic-backdrop.css', 'components/background-music.css', 'components/rich-text.css', 'components/search-voyage.css', 'components/association-space.css', 'components/wormhole.css', 'components/wormhole-flow.css']) {
   const tree = postcss.parse(fs.readFileSync(path.join(root, name), 'utf8'))
   tree.walkRules(rule => {
     let parent = rule.parent

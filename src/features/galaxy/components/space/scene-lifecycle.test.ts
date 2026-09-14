@@ -11,7 +11,7 @@ type ElementTree = { type?: unknown; props?: Record<string, unknown> };
 /** Execute the real scene's hooks/listeners with a renderer boundary, retaining
  * its real Three geometry/materials and transition implementation. No DOM or
  * GPU is required, so lifecycle events can be dispatched deterministically. */
-test('the actual scene retains search effects through visibility/context pauses and disposes them on unmount', async () => {
+test('the actual scene retains search effects through visibility/context pauses and disposes them on unmount', async t => {
   const effects: (() => void | (() => void))[] = [];
   const cleanups: (() => void)[] = [];
   const frames = new Map<number, FrameRequestCallback>();
@@ -101,15 +101,81 @@ test('the actual scene retains search effects through visibility/context pauses 
     const { default: Scene } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`) as {
       default: (props: SceneProps) => unknown;
     };
+    const answer = (id: string, count: number): SceneProps['questions'][number]['answers'][number] => ({
+      id, title: `文章 ${id}`, author: '作者', excerpt: '摘要', relevance: 1,
+      url: `https://www.zhihu.com/question/123/answer/${id}`, isExcerpt: false,
+      paragraphs: Array.from({ length: count }, (_, index) => `真实文章中有意义的核心段落 ${index + 1}，对应自己的行星。`),
+      highlights: Array.from({ length: count }, (_, index) => ({
+        id: `${id}:paragraph:${index}`, text: `核心段落 ${index + 1}`, paragraphIndex: index,
+      })),
+    });
     const props: SceneProps = {
-      questions: [{ id: 'lifecycle:question', title: '真实星体', excerpt: '摘要', keywords: [],
-        relevance: 1, color: '#a6c8eb', answers: [] }],
+      questions: [
+        { id: 'lifecycle:question', title: '真实星体', excerpt: '摘要', keywords: [],
+          relevance: 1, color: '#a6c8eb', answers: [answer('101', 2), answer('102', 3)] },
+        { id: 'lifecycle:other-question', title: '另一个问题', excerpt: '摘要', keywords: [],
+          relevance: 1, color: '#ceb8ed', answers: [answer('201', 5)] },
+      ],
       selectedQuestionId: 'lifecycle:question', selectedAnswerId: null, selectedParagraph: null,
       depth: 0, resetToken: 0, flightMode: false, reducedMotion: false, voyage: null,
       onDepthChange() {}, onSelectQuestion() {}, onSelectAnswer() {}, onOpenReader() {}, onSelectParagraph() {},
     };
     attach(Scene(props));
     for (const effect of effects) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
+    await t.test('each depth shows only its content-bearing stars and reverse navigation restores them', () => {
+      step(100);
+      assert.ok(renderedScene);
+      const scene = renderedScene;
+      // Answer stars are independent scene actors. The article title star is
+      // inside its planetary system, so it must survive hiding answer actors.
+      const answerStars = scene.children.filter(object => object.userData.celestialType === 'star');
+      assert.equal(answerStars.length, 3, 'retain all real answers for later navigation');
+      const visibleAnswers = () => answerStars.filter(object => object.visible);
+      assert.deepEqual(visibleAnswers(), [], 'overview must not show anonymous answer spheres');
+
+      props.depth = 1;
+      step(200);
+      const firstQuestionStars = visibleAnswers();
+      assert.equal(firstQuestionStars.length, 2, 'the first question has exactly two answer stars');
+
+      props.selectedQuestionId = 'lifecycle:other-question';
+      props.selectedAnswerId = '201';
+      step(300);
+      const otherQuestionStars = visibleAnswers();
+      assert.equal(otherQuestionStars.length, 1, 'only the newly selected question may show its answer');
+      assert.ok(firstQuestionStars.every(star => !star.visible), 'the previous question cannot leave floating answer spheres');
+      assert.ok(!firstQuestionStars.includes(otherQuestionStars[0]));
+
+      props.depth = 2;
+      step(400);
+      assert.deepEqual(visibleAnswers(), [], 'article depth cannot leave sibling or other-question answer spheres');
+      const system = scene.getObjectByName('article-planetary-system');
+      assert.ok(system?.visible, 'the selected article retains its planetary system');
+      assert.ok(system.getObjectByName('article-star')?.visible, 'the central article-title star remains visible');
+      const planets = system.children.filter(object => object.userData.celestialType === 'planet');
+      assert.equal(planets.length, 5, 'retain every real paragraph planet, including paragraphs on another label page');
+      assert.deepEqual(planets.map(planet => planet.visible), [true, true, true, true, false],
+        'only the four paragraphs on the current desktop page have visible planets');
+      assert.deepEqual(planets.map((_, index) => system.getObjectByName(`planet-orbit-${index}`)?.visible),
+        [true, true, true, true, false], 'hidden paragraph pages must not leave empty decorative orbits');
+      assert.ok(system.position.distanceTo(otherQuestionStars[0].position) < 0.01,
+        'the article system grows from its actual answer star');
+
+      props.depth = 1;
+      step(500);
+      assert.deepEqual(visibleAnswers(), otherQuestionStars, 'reverse zoom restores the same answer actors');
+      assert.equal(system.visible, false, 'paragraph planets disappear when their article is exited');
+      props.selectedQuestionId = 'lifecycle:question';
+      props.selectedAnswerId = '101';
+      step(600);
+      assert.deepEqual(visibleAnswers(), firstQuestionStars, 'switching back restores the original question answers');
+      assert.ok(otherQuestionStars.every(star => !star.visible));
+      props.depth = 0;
+      props.selectedAnswerId = null;
+      step(700);
+      assert.deepEqual(visibleAnswers(), [], 'returning to overview leaves only the question galaxies');
+      assert.equal(system.visible, false);
+    });
     step(1000);
     assert.ok(renderedScene);
     const transition = renderedScene.getObjectByName('knowledge-search-transition');

@@ -43,6 +43,8 @@ interface GalaxySceneProps {
   onSelectAnswer: (id: string) => void;
   flightMode: boolean;
   reducedMotion: boolean;
+  suspended?: boolean;
+  onReady?: () => void;
   resetToken: number;
   relevanceLabel?: string;
   onOpenReader: (paragraphIndex?: number, quote?: string) => void;
@@ -295,8 +297,10 @@ export default function GalaxyScene(props: GalaxySceneProps) {
   useEffect(() => {
     const canvas = canvasRef.current,
       container = containerRef.current;
-    if (!canvas || !container || !layout.length) return;
+    if (!canvas || !container || !layout.length || props.suspended) return;
     if (propsRef.current.voyage?.phase === "birth") cameraMemory.current = null;
+    const signalReady = props.onReady;
+    let announcedReady = false;
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -307,7 +311,8 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       });
     } catch {
       setWebglAvailable(false);
-      return;
+      const fallbackFrame = requestAnimationFrame(() => signalReady?.());
+      return () => cancelAnimationFrame(fallbackFrame);
     }
     setWebglAvailable(true);
     let width = container.clientWidth,
@@ -499,6 +504,9 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         source.answers[0];
       return { q, a, source, answer };
     };
+    const onContentPage = (index: number) =>
+      index >= pageRef.current * pageSizeRef.current &&
+      index < (pageRef.current + 1) * pageSizeRef.current;
     const syncPlanets = (depth: number) => {
       const { q, a, answer } = focus();
       if (!answer || !a || depth < 1.08) {
@@ -570,7 +578,6 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       const latest = propsRef.current;
       const { q, a, answer } = focus();
       const active = bodies(level);
-      currentBodies = active;
       const scope = `${level}:${q.question.id}:${answer?.id}:${pageRef.current}:${width}`;
       if (scope !== lastLabelScope || widthCache !== width) {
         bodySizes.clear();
@@ -586,6 +593,15 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         width: number;
         height: number;
       }[] = [];
+      // Keep projected text clear of the new entrance, including its luminous
+      // rim and hover hint. Only labels move; their physical stars stay put.
+      const portal = container.closest(".app")?.querySelector<HTMLElement>(".wormhole-portal");
+      if (portal) {
+        const rect = portal.getBoundingClientRect();
+        const sceneRect = container.getBoundingClientRect();
+        obstacles.push({ x: rect.left - sceneRect.left - 16, y: rect.top - sceneRect.top - 28,
+          width: rect.width + 32, height: rect.height + 62 });
+      }
       if (level > 0) {
         const origin = level === 2 && a ? a.position : q.position;
         const center = projectAnchor(origin, camera, width, height);
@@ -622,6 +638,8 @@ export default function GalaxyScene(props: GalaxySceneProps) {
             (pageRef.current + 1) * pageSizeRef.current,
           )
         : active;
+      // Hidden pages have neither rendered bodies nor invisible click targets.
+      currentBodies = pageBodies;
       const entries: LabelInput[] = [];
       pageBodies.forEach((node, index) => {
         const element = labelsRef.current.get(node.key);
@@ -874,6 +892,11 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       if (system) {
         system.group.scale.setScalar(1);
         system.setOpacity(smooth((depth - 1.25) / 0.6));
+        system.planets.forEach((planet) => {
+          const visible = level === 2 && onContentPage(planet.index);
+          planet.object.visible = visible;
+          planet.orbit.visible = visible;
+        });
         system.update(elapsed, latest.reducedMotion, paused);
       }
       if (level > 0) {
@@ -924,15 +947,16 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         galaxyModels
           .get(node.question.id)
           ?.update(elapsed, latest.reducedMotion);
-        node.answers.forEach(({ answer }) => {
+        node.answers.forEach(({ answer }, index) => {
           const star = answerStars.get(answer.id)!;
-          const opacity = chosen
-            ? (0.48 + inward * 0.52) * (1 - intimate * 0.96)
-            : 0.3 * (1 - inward);
+          // Answer bodies belong to this question's answer layer. Keeping a
+          // residual glow elsewhere creates apparently unbound planets beside
+          // overview questions and inside another article's planetary system.
+          const opacity = chosen && level === 1 && onContentPage(index)
+            ? smooth((depth - 0.65) / 0.2) * (1 - smooth((depth - 1.25) / 0.4))
+            : 0;
           star.setOpacity(
-            depth >= 1.68 && answer.id === a?.answer.id
-              ? 0
-              : opacity * (0.55 + relevance(answer.relevance) * 0.45),
+            opacity * (0.55 + relevance(answer.relevance) * 0.45),
           );
           star.update(elapsed, latest.reducedMotion, paused);
         });
@@ -1023,6 +1047,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       writeProjection(level, dt);
       projectionTick++;
       renderer.render(scene, camera);
+      if (!announcedReady) { announcedReady = true; signalReady?.(); }
       if (voyage?.phase === "birth" && !voyage.ready) latest.onVoyageReady?.(voyage.id);
     };
     const nearestBody = (x: number, y: number) => {
@@ -1261,7 +1286,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       texture.dispose();
       renderer.dispose();
     };
-  }, [layout]);
+  }, [layout, props.suspended, props.onReady]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1269,7 +1294,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       const latest = propsRef.current;
-      if (latest.voyage) return;
+      if (latest.voyage || latest.suspended) return;
       const delta =
         event.deltaMode === 1
           ? event.deltaY * 16
@@ -1317,7 +1342,9 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       ? `主题聚合 · ${question.answers.length} 份材料`
       : question.kind === "article"
         ? "独立文章"
-        : `${question.answers.length} 个回答`;
+        : !question.answers.length && question.answersExpanded === false
+          ? (question.hotRank ? `知乎热榜 · ${question.hotRank}` : "进入查看回答")
+          : `${question.answers.length} 个回答`;
   return (
     <div
       ref={containerRef}
@@ -1326,7 +1353,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
       data-voyage={props.voyage?.phase ?? "idle"}
       aria-label="知识宇宙探索"
     >
-      <CosmicBackdrop depth={props.depth} reducedMotion={props.reducedMotion} />
+      <CosmicBackdrop depth={props.depth} reducedMotion={props.reducedMotion || !!props.suspended} />
       <canvas
         ref={canvasRef}
         className="galaxy-canvas"
@@ -1368,9 +1395,6 @@ export default function GalaxyScene(props: GalaxySceneProps) {
             reducedMotion={props.reducedMotion}
           />
         );
-        const spec = question
-          ? layout.find((node) => node.question.id === question.id)?.spec
-          : undefined;
         return (
           <div
             key={layer.id}
@@ -1431,7 +1455,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
                   )}
                   <span className="galaxy-hub-meta">
                     {layer.stage === 1
-                      ? `${sourceSubtitle(question)}${spec ? ` · ${spec.label}` : ""}`
+                      ? sourceSubtitle(question)
                       : answer?.author}
                   </span>
                   {layer.stage === 2 && (
@@ -1614,7 +1638,7 @@ export default function GalaxyScene(props: GalaxySceneProps) {
                       </button>
                       <span className="galaxy-label-meta">
                         {isQuestion
-                          ? `${sourceSubtitle(q!)} · ${layout.find((node) => node.question.id === q!.id)?.spec.label ?? ""}`
+                          ? sourceSubtitle(q!)
                           : highlight
                             ? `${readingSource}第 ${highlight.paragraphIndex + 1} 段 · ${planetKindNames[getPlanetKind(a!.id, page * pageSizeRef.current + index)]}${selected ? " · 已选中" : ""}`
                             : a?.author}

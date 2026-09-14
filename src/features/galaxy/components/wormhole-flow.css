@@ -1,0 +1,4 @@
+.galaxy-page .wormhole-flow { position: absolute; inset: 0; pointer-events: none; z-index: 35; }
+.galaxy-page .wormhole-flow > * { pointer-events: auto; }
+.galaxy-page .app:not([data-wormhole="idle"]) > .interface { visibility: hidden; }
+.galaxy-page .app:is([data-wormhole="entering"], [data-wormhole="space"], [data-wormhole="departing"]) > :is(.universe, .universe-vignette) { visibility: hidden; }

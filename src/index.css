@@ -73,3 +73,9 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Local CJK fallbacks for machines without Songti/PingFang/YaHei. Existing
+   installed system faces stay first in the stacks; no remote fonts are used. */
+@font-face { font-family: 'Wanderwise Host CJK'; font-style: normal; font-weight: 100 900; font-display: swap; src: url('/galaxy/fonts/noto-sans-sc.woff2') format('woff2'); }
+@font-face { font-family: 'Wanderwise Host Fangsong'; font-style: normal; font-weight: 400; font-display: swap; src: url('/galaxy/fonts/zhuque-fangsong.woff2') format('woff2'); }
+@layer base { body { font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, 'Wanderwise Host CJK', sans-serif; } }

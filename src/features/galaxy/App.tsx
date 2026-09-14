@@ -35,6 +35,11 @@ import {
   Cable,
 } from "lucide-react";
 import GalaxyScene from "./components/GalaxyScene";
+import AssociationSpace from "./components/AssociationSpace";
+import WormholePortal from "./components/WormholePortal";
+import WormholeTransit from "./components/WormholeTransit";
+import { useWormhole } from "./lib/useWormhole";
+import "./components/wormhole-flow.css";
 import ReadingRoom from "./components/ReadingRoom";
 import BackgroundMusic from "./components/BackgroundMusic";
 import RichText from "./components/RichText";
@@ -65,7 +70,11 @@ import {
   getInitialEntry,
   registerObservatoryEntry,
   returnToObservatory,
+  exportJourneyToObservatory,
 } from "./lib/integration";
+import { createJourneyExport, startNewTrip, type JourneyExportPacket } from "./lib/trip";
+import { useJourneyExitGuard } from "./lib/useJourneyExitGuard";
+import "./components/trip-exit.css";
 
 type Drawer =
   | "collection"
@@ -182,12 +191,14 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   const [query, setQuery] = useState(entry.query);
   const [sourceEntryQuery] = useState(entry.query);
   const [searchText, setSearchText] = useState(entry.query);
+  const [discoveryMode, setDiscoveryMode] = useState<"hot" | "public">("hot");
   const [data, setData] = useState<ExploreResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [voyage, setVoyage] = useState<SearchVoyage | null>(null);
   const voyageRef = useRef(voyage);
   voyageRef.current = voyage;
   const searchSerial = useRef(0);
+  const wormholeResult = useRef<ExploreResponse | null>(null);
   const finishCollapse = useRef<(() => void) | null>(null);
   const sceneSnapshot = useRef<{
     questions: Question[];
@@ -234,6 +245,27 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   const [collection, setCollection] = useState(loadCollection);
   const [reflections, setReflections] = useState(loadReflections);
   const [journey, setJourney] = useState(loadJourney);
+  const [tripExit, setTripExit] = useState<"return" | "close" | null>(null);
+  const [tripFinished, setTripFinished] = useState(false);
+  const tripFinishedRef = useRef(false);
+  const [tripStatus, setTripStatus] = useState("");
+  const [tripError, setTripError] = useState("");
+  const [finishedExport, setFinishedExport] = useState<JourneyExportPacket | null>(null);
+  const { allowLeave, rearm } = useJourneyExitGuard({
+    dirty: journey.length > 0 && !tripFinished,
+    onCloseAttempt: () => { setTripError(""); setTripExit("close"); },
+  });
+  const beginTrip = useCallback(() => {
+    startNewTrip();
+    tripFinishedRef.current = false;
+    setTripFinished(false);
+    setJourney([]);
+    setTripExit(null);
+    setTripError("");
+    setTripStatus("");
+    setFinishedExport(null);
+    rearm();
+  }, [rearm]);
   const [selectedParagraph, setSelectedParagraph] = useState<number | null>(
     null,
   );
@@ -322,6 +354,45 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
       item.type === (level === 2 ? "answer" : "question"),
   );
 
+  const [spaceReadyKey, setSpaceReadyKey] = useState<string | null>(null);
+  const [galaxyReadyKey, setGalaxyReadyKey] = useState<string | null>(null);
+  const wormhole = useWormhole({
+    seed: query || selectedQuestion?.title || "今日热点",
+    context: [...(data?.keywords ?? []), ...questions.map(question => question.title)].slice(0, 12),
+    onBegin: () => {
+      setSpaceReadyKey(null);
+      setGalaxyReadyKey(null);
+      if (tripFinishedRef.current) beginTrip();
+      setFlightMode(false);
+      setReaderOpen(false);
+      setDrawer(null);
+    },
+    onArrive: (result, keyword) => {
+      // Reuse this exact search response; travelling must not spend quota twice.
+      setGalaxyReadyKey(null);
+      wormholeResult.current = result;
+      pendingVisit.current = null;
+      setDiscoveryMode("hot");
+      setSearchText(keyword);
+      setQuery(keyword);
+      setEntry(previous => ({ ...previous, query: keyword }));
+      setResetToken(value => value + 1);
+      const url = new URL(window.location.href);
+      url.searchParams.delete("topic");
+      url.searchParams.set("q", keyword);
+      window.history.replaceState(window.history.state, "", url);
+      if (keyword === query) setRetry(value => value + 1);
+    },
+  });
+  const resetWormhole = wormhole.reset;
+  const wormholeActive = wormhole.phase !== "idle";
+  const wormholeSuspended = wormhole.phase === "entering" || wormhole.phase === "space" || wormhole.phase === "departing";
+  const spaceRenderKey = JSON.stringify([wormhole.seed, wormhole.topics.map(topic => topic.keyword)]);
+  const galaxyRenderKey = JSON.stringify([query, data?.query, data?.fetchedAt, resetToken, questions.map(question => question.id)]);
+  const spaceReady = useCallback(() => setSpaceReadyKey(spaceRenderKey), [spaceRenderKey]);
+  const galaxyReady = useCallback(() => setGalaxyReadyKey(galaxyRenderKey), [galaxyRenderKey]);
+  const entryReady = spaceReadyKey === spaceRenderKey && !wormhole.loading;
+  const exitReady = galaxyReadyKey === galaxyRenderKey && !loading && data?.query === query;
   const notify = useCallback((message: string) => setToast(message), []);
   useEffect(() => {
     if (!toast) return;
@@ -331,7 +402,11 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   useEffect(
     () =>
       registerObservatoryEntry((next) => {
+        resetWormhole();
+        wormholeResult.current = null;
         pendingVisit.current = null;
+        beginTrip();
+        setDiscoveryMode("hot");
         setEntry({ ...next, returnUrl: next.returnUrl ?? "/observatory" });
         setQuery(next.query);
         setSearchText(next.query);
@@ -340,14 +415,16 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
         setDepth(0);
         setRetry((value) => value + 1);
       }),
-    [],
+    [beginTrip, resetWormhole],
   );
   useEffect(() => {
     const controller = new AbortController();
     const serial = ++searchSerial.current;
     const previousVoyage = voyageRef.current;
-    const sourceEntry = entrySources.length > 0 && query === sourceEntryQuery && retry === 0;
-    const animateSearch = !sourceEntry && !reducedMotionRef.current && !pendingVisit.current && !!sceneSnapshot.current?.questions.length;
+    const prepared = wormholeResult.current?.query === query ? wormholeResult.current : null;
+    wormholeResult.current = null;
+    const sourceEntry = !prepared && entrySources.length > 0 && query === sourceEntryQuery && retry === 0;
+    const animateSearch = !prepared && !sourceEntry && !reducedMotionRef.current && !pendingVisit.current && !!sceneSnapshot.current?.questions.length;
     const startedAt = animateSearch && previousVoyage && previousVoyage.phase !== "birth"
       ? previousVoyage.startedAt : performance.now();
     const remaining = animateSearch ? Math.max(0, COLLAPSE_MS - (performance.now() - startedAt)) : 0;
@@ -383,7 +460,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
       setSelectedQuestionId(sourceQuestions[0].id);setSelectedAnswerId(sourceQuestions[0].answers[0].id);setLoading(false)
       return () => { controller.abort(); clearTimeout(collapseTimer); }
     }
-    fetch(`/api/explore?q=${encodeURIComponent(query)}`, {
+    (prepared ? Promise.resolve(prepared) : fetch(`/api/explore?q=${encodeURIComponent(query)}${!query && discoveryMode === "public" ? "&mode=public" : ""}`, {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -396,7 +473,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
               "暂时无法连接知识星海",
           );
         return result as ExploreResponse;
-      })
+      }))
       .then(async (result) => {
         await minimum;
         if (controller.signal.aborted) return;
@@ -480,7 +557,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
       controller.abort();
       clearTimeout(collapseTimer);
     };
-  }, [query, retry, notify, entrySources, sourceEntryQuery]);
+  }, [query, retry, discoveryMode, notify, entrySources, sourceEntryQuery]);
 
   useEffect(() => {
     setDetailError("");
@@ -539,13 +616,14 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   useEffect(() => {
     if (
       loading ||
+      tripFinishedRef.current ||
       data?.query !== query ||
       level === 0 ||
       !selectedQuestion ||
       (level === 2 && !selectedAnswer)
     )
       return;
-    const item: JourneyStop = {
+    const item: JourneyStop & { url?: string } = {
       id: crypto.randomUUID(),
       title: level === 2 ? selectedAnswer!.title : selectedQuestion.title,
       type: level === 2 ? "answer" : "question",
@@ -553,6 +631,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
       answerId: level === 2 ? selectedAnswer?.id : undefined,
       query,
       visitedAt: new Date().toISOString(),
+      url: level === 2 ? selectedAnswer?.url : selectedQuestion.url,
     };
     setJourney((previous) => {
       const last = previous.at(-1);
@@ -576,11 +655,13 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
     data?.query,
     selectedQuestion,
     selectedAnswer,
+    tripFinished,
     notify,
   ]);
 
   function chooseQuestion(id: string, interruptVoyage = false) {
     if (voyage && !interruptVoyage) return;
+    if (tripFinishedRef.current) beginTrip();
     if (interruptVoyage) setVoyage(null);
     const question = questions.find((item) => item.id === id);
     setSelectedQuestionId(id);
@@ -591,6 +672,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   }
   function chooseAnswer(id: string) {
     if (voyage) return;
+    if (tripFinishedRef.current) beginTrip();
     setSelectedAnswerId(id);
     setSelectedParagraph(null);
     setSelectedQuote(undefined);
@@ -598,6 +680,8 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   }
   function search(event: FormEvent) {
     event.preventDefault();
+    if (tripFinishedRef.current) beginTrip();
+    setDiscoveryMode("hot");
     pendingVisit.current = null;
     const next = searchText.trim().slice(0, 160);
     setQuery(next);
@@ -611,6 +695,8 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
     searchRef.current?.blur();
   }
   function discover() {
+    if (tripFinishedRef.current) beginTrip();
+    setDiscoveryMode("hot");
     pendingVisit.current = null;
     setSearchText("");
     setQuery("");
@@ -620,6 +706,10 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
     url.searchParams.delete("topic");
     window.history.replaceState(window.history.state, "", url);
     if (!query) setRetry((value) => value + 1);
+  }
+  function browsePublic() {
+    discover();
+    setDiscoveryMode("public");
   }
   function toggleSave() {
     if (level === 0 || !selectedQuestion || !activeSavedId) return;
@@ -693,6 +783,9 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
     );
   }
   function visit(item: Pick<JourneyStop, "questionId" | "answerId" | "query">) {
+    if (tripFinishedRef.current) beginTrip();
+    const targetMode = /^(?:topic-|knowledge-)/.test(item.questionId) ? "public" : "hot";
+    setDiscoveryMode(targetMode);
     setDrawer(null);
     setSearchText(item.query);
     setEntry((previous) => ({ ...previous, query: item.query }));
@@ -702,7 +795,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
     else url.searchParams.delete("q");
     window.history.replaceState(window.history.state, "", url);
     const destination = locateStop(questions, item);
-    if (query === item.query && destination) {
+    if (query === item.query && destination && (query || targetMode === discoveryMode)) {
       chooseQuestion(destination.question.id, true);
       if (destination.answerId) setSelectedAnswerId(destination.answerId);
       setDepth(destination.answerId ? 2 : 1);
@@ -715,14 +808,66 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   }
   function exportNotes() {
     downloadMarkdown(
-      exportNotebook(collection, reflections, journey),
+      exportNotebook(collection, reflections, tripFinished ? finishedExport?.journey ?? [] : journey),
       `Wanderwise-旅行手记-${new Date().toISOString().slice(0, 10)}.md`,
     );
     notify("旅行手记已导出");
   }
   function returnHome() {
-    if (!returnToObservatory(entry, { collection, reflections, journey }))
+    if (journey.length && !tripFinishedRef.current) {
+      setDrawer(null);
+      setTripError("");
+      setTripExit("return");
+      return;
+    }
+    allowLeave();
+    if (!returnToObservatory(entry, { collection, reflections, journey: [] }))
       setDrawer("return");
+  }
+  function finishTrip(exportRequested: boolean) {
+    const mode = tripExit;
+    let packet: JourneyExportPacket | undefined;
+    let status = "本次旅行已结束，足迹未导出。";
+    if (exportRequested) {
+      try {
+        packet = createJourneyExport({ query, journey });
+        const result = exportJourneyToObservatory(packet);
+        if (!result.stored && !result.acknowledged) {
+          setTripError("足迹暂时未能保存或交付，请重试。本次记录仍然保留。");
+          return;
+        }
+        status = result.acknowledged
+          ? "占星台已接收本次漫游足迹。"
+          : "本次足迹已保存，待占星台领取。";
+      } catch {
+        setTripError("足迹暂时未能导出，请重试。本次记录仍然保留。");
+        return;
+      }
+    }
+    // An ended trip must never be replaced by a late wormhole destination.
+    resetWormhole();
+    wormholeResult.current = null;
+    // Disable the native guard synchronously before handing navigation to a host.
+    allowLeave();
+    startNewTrip();
+    tripFinishedRef.current = true;
+    setTripFinished(true);
+    setJourney([]);
+    setTripExit(null);
+    setTripStatus(status);
+    setFinishedExport(packet ?? null);
+    setTripError("");
+    setDrawer(null);
+    setReaderOpen(false);
+    setReflectionTarget(null);
+    setDepth(0);
+    setVoyage(null);
+    if (mode === "return") {
+      const returned = returnToObservatory(entry, {
+        collection, reflections, journey: packet?.journey ?? [], ...(packet ? { trip: packet } : {}),
+      });
+      if (!returned) setDrawer("return");
+    } else notify(`${status}现在可以关闭此页。`);
   }
   async function toggleFullscreen() {
     try {
@@ -739,13 +884,18 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   }, []);
   useEffect(() => {
     function keyboard(event: KeyboardEvent) {
+      if (wormholeActive && !tripExit) {
+        if (event.key === "Escape") { event.preventDefault(); wormhole.back(); }
+        return;
+      }
       const editing =
         event.target instanceof Element &&
         event.target.closest(
           'input, textarea, select, [contenteditable="true"]',
         );
       if (event.key === "Escape") {
-        if (reflectionTarget) setReflectionTarget(null);
+        if (tripExit) setTripExit(null);
+        else if (reflectionTarget) setReflectionTarget(null);
         else if (drawer) setDrawer(null);
         else if (readerOpen) setReaderOpen(false);
         else if (level > 0) setDepth(level - 1);
@@ -754,6 +904,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
       }
       if (
         editing ||
+        tripExit ||
         drawer ||
         reflectionTarget ||
         event.ctrlKey ||
@@ -951,6 +1102,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   }
   function changeDepth(value: number) {
     if (voyage) return;
+    if (tripFinishedRef.current && value > 0) beginTrip();
     setDepth(
       Math.max(
         0,
@@ -959,7 +1111,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
     );
     setReaderOpen(false);
   }
-  const modalActive = !!drawer || !!reflectionTarget || readerOpen;
+  const modalActive = !!drawer || !!reflectionTarget || readerOpen || !!tripExit;
   if ((!loading && !voyage || voyage?.phase === "birth") && questions.length) {
     sceneSnapshot.current = {
       questions, questionId: selectedQuestion?.id ?? null,
@@ -972,11 +1124,15 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
   return (
     <main
       className={`app immersion-v2 depth-${level} ${modalActive ? "has-modal" : ""}`}
+      data-wormhole={wormhole.phase}
+      data-wormhole-space-ready={entryReady}
+      data-wormhole-galaxy-ready={exitReady}
     >
       <div
         className="universe"
         aria-label="交互式三维知识宇宙"
-        inert={modalActive}
+        inert={modalActive || wormholeActive}
+        aria-hidden={wormholeActive}
       >
         <GalaxyScene
           questions={departingScene?.questions ?? questions}
@@ -984,11 +1140,13 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
           selectedAnswerId={departingScene ? departingScene.answerId : selectedAnswer?.id ?? null}
           depth={departingScene?.depth ?? depth}
           voyage={voyage}
+          suspended={wormholeSuspended}
+          onReady={galaxyReady}
           onVoyageReady={voyageReady}
           onDepthChange={changeDepth}
           onSelectQuestion={chooseQuestion}
           onSelectAnswer={chooseAnswer}
-          flightMode={flightMode && !modalActive && !voyage}
+          flightMode={flightMode && !modalActive && !voyage && !wormholeActive}
           reducedMotion={reducedMotion}
           resetToken={resetToken}
           onOpenReader={openReader}
@@ -998,7 +1156,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
         />
       </div>
       <div className="universe-vignette" />
-      <div className="interface" inert={modalActive}>
+      <div className="interface" inert={modalActive || wormholeActive} aria-hidden={wormholeActive}>
         <header className="topbar">
           <button
             className="brand"
@@ -1023,11 +1181,11 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
               aria-label="探索问题或话题"
               maxLength={160}
             />
-            {query && (
+            {(query || discoveryMode === "public") && (
               <button
                 type="button"
                 className="search-clear"
-                aria-label="回到自由漫游"
+                aria-label={query ? "回到自由漫游" : "返回知乎热榜"}
                 onClick={discover}
               >
                 <X size={14} />
@@ -1091,6 +1249,12 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
         {voyage && <span className="search-voyage-status" role="status">
           {voyage.phase === "birth" ? "新的知识星海正在涌现" : "正在穿越黑洞，寻找新的星光"}
         </span>}
+        {!loading && level === 0 && data?.source === "zhihu-hot" && data.stale && (
+          <div className="orbit-status" role="status">
+            <Info size={13} />
+            <span>热榜暂时未能更新，当前显示 {timeLabel(data.fetchedAt)} 获取的缓存。</span>
+          </div>
+        )}
         {!loading && (error || !questions.length) && (
           <div className="center-message empty-universe" role="status">
             <Telescope size={34} />
@@ -1107,12 +1271,17 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
               <button
                 className="primary-button"
                 onClick={
-                  error ? () => setRetry((value) => value + 1) : discover
+                  error ? () => setRetry((value) => value + 1) : browsePublic
                 }
               >
                 {error ? <RefreshCw size={15} /> : <Compass size={15} />}
                 {error ? "重新连接" : "浏览公开知识"}
               </button>
+              {error && !query && discoveryMode === "hot" && (
+                <button className="secondary-button" onClick={browsePublic}>
+                  浏览公开知识
+                </button>
+              )}
               {!connection?.configured && (
                 <button
                   className="secondary-button"
@@ -1281,7 +1450,25 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
           </IconButton>
         </div>
       </div>
-      {readerOpen && selectedAnswer && (
+      <div className="wormhole-flow" inert={modalActive}>
+        {wormhole.phase === "idle" && (
+          <WormholePortal onEnter={wormhole.enter} reducedMotion={reducedMotion}
+            disabled={modalActive || loading || !!voyage || !questions.length} />
+        )}
+        {(wormhole.phase === "entering" || wormhole.phase === "space" || wormhole.phase === "departing") && (
+          <AssociationSpace key={spaceRenderKey} active={wormhole.phase === "space"} onReady={spaceReady} seed={wormhole.seed} topics={wormhole.topics} reducedMotion={reducedMotion}
+            paused={modalActive || wormhole.phase === "departing"} loading={wormhole.loading}
+            error={wormhole.error} onRetry={wormhole.retry} onChoose={wormhole.choose} onBack={wormhole.back} />
+        )}
+        {wormhole.phase === "entering" && (
+          <WormholeTransit key="enter" direction="in" ready={entryReady} reducedMotion={reducedMotion} onComplete={wormhole.transitComplete} />
+        )}
+        {(wormhole.phase === "departing" || wormhole.phase === "emerging") && (
+          <WormholeTransit key="leave" direction="out" ready={wormhole.phase === "emerging" && exitReady}
+            reducedMotion={reducedMotion} onComplete={wormhole.transitComplete} />
+        )}
+      </div>
+      {readerOpen && selectedAnswer && !tripExit && (
         <ReadingRoom
           answer={selectedAnswer}
           selectedParagraph={selectedParagraph}
@@ -1293,7 +1480,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
           dimmed={!!reflectionTarget}
         />
       )}
-      {drawer && (
+      {drawer && !tripExit && (
         <Modal
           title={
             drawer === "collection"
@@ -1440,13 +1627,12 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
           )}
           {drawer === "journey" && (
             <>
-              <p className="modal-subtitle">你走过的方向，会连成自己的星座。</p>
+              <p className="modal-subtitle">仅记录本次旅行，结束时可交给占星台。</p>
               <div className="journey-summary">
                 <strong>{journey.length}</strong>
                 <span>次停留</span>
                 <i />
-                <strong>{reflections.length}</strong>
-                <span>束思考</span>
+                <span>本次漫游</span>
               </div>
               <div className="drawer-content journey-list">
                 {journey.length ? (
@@ -1483,10 +1669,10 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
                 )}
               </div>
               <div className="drawer-footer">
-                <span>记录最近 300 次停留</span>
-                <button className="secondary-button" onClick={exportNotes}>
-                  <Download size={15} />
-                  导出手记
+                <span>本次最近 300 次停留</span>
+                <button className="secondary-button" onClick={returnHome}>
+                  <Telescope size={15} />
+                  结束旅行
                 </button>
               </div>
             </>
@@ -1645,11 +1831,10 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
                 <Sparkles size={24} />
               </div>
               <p className="return-copy">
-                这次旅行，你带回了 <strong>{collection.length}</strong>{" "}
-                束星光，留下了 <strong>{reflections.length}</strong> 段思考。
+                {tripFinished ? "本次旅行已结束。" : "准备回到占星台。"}
               </p>
               <p className="modal-subtitle">
-                当前为独立星空探索空间。接入观星台后，你可以从这里回到自己的小屋；此刻也可以导出手记，把收获带走。
+                {tripStatus || "足迹尚未能返回观星台，请稍后重试。收藏与思考仍保存在个人空间。"}
               </p>
               <div className="button-row">
                 <button className="primary-button" onClick={exportNotes}>
@@ -1658,7 +1843,7 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
                 </button>
                 <button
                   className="secondary-button"
-                  onClick={() => setDrawer(null)}
+                  onClick={() => { if (tripFinishedRef.current) beginTrip(); setDrawer(null); }}
                 >
                   继续漫游
                   <ArrowRight size={16} />
@@ -1668,7 +1853,25 @@ export default function App({returnLabel="返回观星台",entrySources=EMPTY_EN
           )}
         </Modal>
       )}
-      {reflectionTarget && (
+      {tripExit && (
+        <Modal title="是否导出漫游足迹" className="trip-exit-modal" onClose={() => setTripExit(null)}>
+          <p className="modal-subtitle">
+            本次共记录 {journey.length} 次停留。导出后，占星台可以接收这次旅行已记录的路径。
+          </p>
+          {tripExit === "close" && <p className="trip-exit-note">完成选择后，可直接关闭网页。</p>}
+          {tripError && <p className="trip-exit-error" role="status">{tripError}</p>}
+          <div className="trip-exit-actions">
+            <button className="primary-button" onClick={() => finishTrip(true)}>
+              <Download size={16} />{tripExit === "return" ? `导出并${returnLabel}` : "导出并结束旅行"}
+            </button>
+            <button className="secondary-button" onClick={() => finishTrip(false)}>
+              {tripExit === "return" ? `不导出，${returnLabel}` : "不导出，结束旅行"}
+            </button>
+            <button className="trip-exit-continue" onClick={() => setTripExit(null)}>继续漫游</button>
+          </div>
+        </Modal>
+      )}
+      {reflectionTarget && !tripExit && (
         <Modal
           title="让这一刻的思考，留下来"
           onClose={() => setReflectionTarget(null)}

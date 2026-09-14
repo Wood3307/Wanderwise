@@ -1,4 +1,8 @@
 import type { ThoughtRecipe } from '../../components/observatory/gardenRecipes'
+import type { JourneyExportPacket } from '../galaxy/lib/trip'
+
+/** A deliberately exported galaxy visit, separate from playable recipe journeys. */
+export type GalaxyVoyage = JourneyExportPacket
 
 export interface ContentSource {
   contentType?: 'answer'|'question'|'article'|'webpage'
@@ -34,6 +38,7 @@ export interface PersonalData {
   notes: PersonalNote[]
   works: PersonalWork[]
   journeys: JourneyInstance[]
+  galaxyVoyages: GalaxyVoyage[]
   recipes: ThoughtRecipe[]
   interests: string[]
   returnAnchor: SceneReturnAnchor | null

@@ -8,6 +8,7 @@ import { enrichHighlights, extractHighlights, getModelStatus } from './highlight
 import { AccessService, cookies } from '../content/access.js';
 import type { SynthesisService } from '../content/synthesis.js';
 import type { SearchContext } from '../content/types.js';
+import { AssociationService, associationPrompt } from './associations.js';
 
 function exploreQuery(raw: unknown): string {
   if (raw !== undefined && typeof raw !== 'string') throw new ApiError(400, 'INVALID_QUERY', '请提供单个探索问题。');
@@ -16,7 +17,7 @@ function exploreQuery(raw: unknown): string {
   return query;
 }
 
-export function createApp(service: ZhihuService, options: { distDir?: string; refreshPublic?: boolean; access?: AccessService; synthesis?: SynthesisService } = {}) {
+export function createApp(service: ZhihuService, options: { distDir?: string; refreshPublic?: boolean; access?: AccessService; synthesis?: SynthesisService; associations?: AssociationService } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('query parser', 'simple');
@@ -64,6 +65,22 @@ export function createApp(service: ZhihuService, options: { distDir?: string; re
     if (origin) { try { sameHost = new URL(origin).host === request.get('host'); } catch { sameHost = false; } }
     if (request.get('sec-fetch-site') === 'cross-site' || !sameHost) throw new ApiError(403, 'CROSS_ORIGIN_REQUEST', '请从当前项目页面发起操作。');
   };
+  // Direct visitors use the same signed identity and configured daily AI limits
+  // as synthesis. One optional CLI answer expands the ideas; destinations are
+  // searched only after the traveler chooses one. Unavailable/exhausted AI keeps
+  // the local semantic exploration usable.
+  const associations = options.associations ?? new AssociationService({ requireActor: true, model: service.content?.configured && options.synthesis ? async (input, _signal, actor) => {
+    const content = service.content!;
+    options.synthesis!.reserveBudget(actor!);
+    return content.runner(['answer', `--query=${associationPrompt(input)}`, '--model', 'zhida-fast-1p5', '--output', 'json'], 10_000);
+  } : undefined });
+  app.post('/api/associations', async (request, response, next) => {
+    try {
+      mutationOrigin(request);
+      const actor = response.locals.visitorId as string;
+      response.json(await associations.discover(request.body, actor));
+    } catch (error) { next(error); }
+  });
   app.get('/api/search', async (request, response, next) => {
     try {
       if (!service.content) throw new ApiError(503, 'CONTENT_UNAVAILABLE', '统一检索服务尚未连接。');
@@ -89,8 +106,10 @@ export function createApp(service: ZhihuService, options: { distDir?: string; re
   app.get('/api/explore', async (request, response, next) => {
     try {
       const query = exploreQuery(request.query.q);
-      if (options.refreshPublic !== false) void service.refreshPublic();
-      response.json(await service.explore(query, context(response, undefined)));
+      const mode = request.query.mode;
+      if (mode !== undefined && mode !== 'public') throw new ApiError(400, 'INVALID_MODE', '请选择有效的探索来源。');
+      if (mode === 'public' && options.refreshPublic !== false) void service.refreshPublic();
+      response.json(await service.explore(query, context(response, undefined), mode));
     } catch (error) { next(error); }
   });
   app.get('/api/questions/:questionId', async (request, response, next) => {

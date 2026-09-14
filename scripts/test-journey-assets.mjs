@@ -48,7 +48,8 @@ for (const image of variant.document.images) {
 }
 assert.ok(variant.document.extensionsRequired.includes('EXT_texture_webp'))
 assert.ok(variant.bytes.length < 7_000_000)
-const report = JSON.parse(read('artifacts/journey-assets/asset-report.json'))
+// The committed mapping is available in a fresh checkout; builder reports are ignored.
+const report = { textures: JSON.parse(read('public/models/garden/journey-textures/url-mapping.json')) }
 const night = report.textures.find(item => item.sourceUrl.includes('milkyway'))
 const fixedFiles = [
   'public/textures/kloppenheim_06_puresky_1k.hdr',
@@ -69,5 +70,6 @@ const budget = {
   oldDayWithHero: report.textures.reduce((sum, item) => sum + item.beforeBytes, 0) - night.beforeBytes + fixedBytes + decoderBytes + original.bytes.length,
   fixedBytes, decoderBytes,
 }
+fs.mkdirSync(path.join(root, 'artifacts/journey-assets'), { recursive: true })
 fs.writeFileSync(path.join(root, 'artifacts/journey-assets/budget-report.json'), JSON.stringify(budget, null, 2) + '\n')
 console.log(JSON.stringify(budget, null, 2))

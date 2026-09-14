@@ -1,0 +1,7 @@
+.galaxy-page .trip-exit-modal { width: min(470px, calc(100vw - 36px)); }
+.galaxy-page .trip-exit-modal .modal-subtitle { margin-bottom: 20px; }
+.galaxy-page .trip-exit-note { font-size: 12px; line-height: 1.9; color: #9fb6bd; margin-bottom: 20px; }
+.galaxy-page .trip-exit-error { font-size: 12px; line-height: 1.9; color: #e4c5a6; margin-bottom: 18px; }
+.galaxy-page .trip-exit-actions { display: grid; gap: 12px; }
+.galaxy-page .trip-exit-actions > button { justify-content: center; }
+.galaxy-page .trip-exit-continue { padding: 10px; color: #a9c6d1; font-size: 12px; }

@@ -1,9 +1,11 @@
 import { create } from 'zustand'
 import { mixThoughtRecipe, KNOWLEDGE_INGREDIENTS } from '../../components/observatory/gardenRecipes'
 import type { ThoughtRecipe } from '../../components/observatory/gardenRecipes'
-import type { CollectionRecord, ContentSource, JourneyInstance, PersonalData, PersonalNote, PersonalWork, ScenePose, SceneReturnAnchor } from './types'
+import type { CollectionRecord, ContentSource, GalaxyVoyage, JourneyInstance, PersonalData, PersonalNote, PersonalWork, ScenePose, SceneReturnAnchor } from './types'
 import { canonicalSource, emptyPersonalData, mergeSourceMetadata, readVault, validatePersonalData, writeVault } from './persistence'
 import { applyCollectionSeed } from './collectionSeed'
+import { normalizeJourneyExport } from '../galaxy/lib/trip'
+import { mergeGalaxyVoyages } from './galaxyVoyageData'
 
 const now = () => new Date().toISOString()
 const uid = () => crypto.randomUUID()
@@ -50,11 +52,36 @@ export const usePersonalStore = create<PersonalState>((set,get)=>({
 let writes:Promise<void>=Promise.resolve()
 let initialized:Promise<void>|undefined
 export function flushPersonalData(){return writes}
+async function persistCurrentProfile(requiredTripId?: string): Promise<PersonalData> {
+  // A queued write is an intent to persist, not a historical profile. Imports
+  // may have committed a newer merged state while this job was waiting.
+  const snapshot = usePersonalStore.getState().data
+  if (requiredTripId && !snapshot.galaxyVoyages.some(trip => trip.tripId === requiredTripId)) throw new Error('待接收足迹已不在当前个人空间中')
+  await writeVault('profile', snapshot)
+  return snapshot
+}
 usePersonalStore.subscribe((state,previous)=>{
   if(!state.ready||!previous.ready||state.data===previous.data)return
-  const snapshot=state.data
-  writes=writes.catch(()=>{}).then(async()=>{await writeVault('profile',snapshot);if(usePersonalStore.getState().data===snapshot&&usePersonalStore.getState().error)usePersonalStore.setState({error:''})}).catch(()=>{usePersonalStore.setState({error:'本机存储暂不可用，请导出个人空间保存本次收获。'})})
+  writes=writes.catch(()=>{}).then(async()=>{const snapshot=await persistCurrentProfile();if(usePersonalStore.getState().data===snapshot&&usePersonalStore.getState().error)usePersonalStore.setState({error:''})}).catch(()=>{usePersonalStore.setState({error:'本机存储暂不可用，请导出个人空间保存本次收获。'})})
 })
+
+/** Resolve only after the actual profile transaction commits; outbox acknowledgement may follow. */
+export async function receiveGalaxyVoyage(value: unknown): Promise<GalaxyVoyage> {
+  const packet = normalizeJourneyExport(value)
+  if (!packet) throw new Error('漫游足迹格式无效')
+  const state = usePersonalStore.getState()
+  if (!state.ready) throw new Error('个人空间尚未准备好')
+  const existing = state.data.galaxyVoyages.find(trip => trip.tripId === packet.tripId)
+  if (!existing) usePersonalStore.setState({ data: { ...state.data, galaxyVoyages: mergeGalaxyVoyages(state.data.galaxyVoyages, [packet]) } })
+  // Serialize with every other profile write. A retry also persists a previous in-memory receipt.
+  // Acknowledge only a transaction containing this trip and the latest profile.
+  const committed = writes.catch(() => {}).then(() => persistCurrentProfile(packet.tripId))
+  writes = committed.then((snapshot) => {
+    if (usePersonalStore.getState().data === snapshot && usePersonalStore.getState().error) usePersonalStore.setState({ error: '' })
+  }).catch(() => { usePersonalStore.setState({ error: '漫游足迹尚未保存，已保留待领取记录。请释放本机空间后重试，或导出个人空间。' }) })
+  await committed
+  return existing ?? packet
+}
 
 const LEGACY_KEYS=['wanderwise-game-v1','wanderwise.collection.v1','wanderwise.reflections.v1','wanderwise.journey.v1','wanderwise-garden-recipes-v1']
 export function initializePersonalSpace(){
@@ -127,15 +154,35 @@ export function migrateLegacy(data:PersonalData):PersonalData {
   return next
 }
 
-export async function importPersonalSpace(raw:string){
-  if(raw.length>12_000_000)throw new Error('个人空间文件过大')
-  const incoming=validatePersonalData(JSON.parse(raw));const current=validatePersonalData(usePersonalStore.getState().data)
+function mergePersonalImport(current:PersonalData,incoming:PersonalData):PersonalData {
   const merge=<T extends {id:string}>(a:T[],b:T[])=>[...new Map([...a,...b].map(x=>[x.id,x])).values()]
   const sources={...current.sources};for(const source of Object.values(incoming.sources))sources[source.id]=mergeSourceMetadata(sources[source.id],source)
-  const data:PersonalData={...current,sources,collections:merge(current.collections,incoming.collections),notes:merge(current.notes,incoming.notes),works:merge(current.works,incoming.works),journeys:merge(current.journeys,incoming.journeys),recipes:merge(current.recipes,incoming.recipes),interests:[...new Set([...current.interests,...incoming.interests])],returnAnchor:current.returnAnchor??incoming.returnAnchor,legacy:{...current.legacy,...incoming.legacy}}
+  const data:PersonalData={...current,sources,collections:merge(current.collections,incoming.collections),notes:merge(current.notes,incoming.notes),works:merge(current.works,incoming.works),journeys:merge(current.journeys,incoming.journeys),galaxyVoyages:mergeGalaxyVoyages(current.galaxyVoyages,incoming.galaxyVoyages),recipes:merge(current.recipes,incoming.recipes),interests:[...new Set([...current.interests,...incoming.interests])],returnAnchor:current.returnAnchor??incoming.returnAnchor,legacy:{...current.legacy,...incoming.legacy}}
   if (current.collectionSeedVersions || incoming.collectionSeedVersions) data.collectionSeedVersions = [...new Set([...(current.collectionSeedVersions ?? []), ...(incoming.collectionSeedVersions ?? [])])]
   if(current.reading||incoming.reading){data.reading={...current.reading};for(const [id,progress] of Object.entries(incoming.reading??{})){if(!data.reading[id]||progress.updatedAt>data.reading[id].updatedAt)data.reading[id]=progress}}
-  await writeVault(`backup-before-import:${Date.now()}`,current);await writeVault('profile',data);validatePersonalData(await readVault('profile'));usePersonalStore.setState({data})
+  return data
+}
+export async function importPersonalSpace(raw:string){
+  if(raw.length>12_000_000)throw new Error('个人空间文件过大')
+  const incoming=validatePersonalData(JSON.parse(raw))
+  // Imports share the profile queue with receipt acknowledgements and reading
+  // updates. Never install a snapshot captured before those edits arrived.
+  const committed=writes.catch(()=>{}).then(async()=>{
+    await writeVault(`backup-before-import:${Date.now()}`,validatePersonalData(usePersonalStore.getState().data))
+    for (;;) {
+      const snapshot=usePersonalStore.getState().data
+      const data=mergePersonalImport(validatePersonalData(snapshot),incoming)
+      await writeVault('profile',data)
+      validatePersonalData(await readVault('profile'))
+      // State edits stay available while IndexedDB is working. If an export or
+      // reader changed it, commit their merged data before publishing success.
+      if(usePersonalStore.getState().data!==snapshot)continue
+      usePersonalStore.setState({data})
+      return
+    }
+  })
+  writes=committed.catch(()=>{})
+  await committed
 }
 export function exportPersonalSpace(){
   const data=JSON.stringify(usePersonalStore.getState().data,null,2);const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`wanderwise-personal-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)

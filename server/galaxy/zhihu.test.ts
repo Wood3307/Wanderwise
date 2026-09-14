@@ -477,12 +477,12 @@ test('public refresh sends no secret and commits only complete valid data', asyn
   } });
   await Promise.all([service.refreshPublic(), service.refreshPublic()]);
   assert.equal(calls, 2);
-  assert.equal((await service.explore('')).source, 'zhihu-public');
+  assert.equal((await service.explore('', undefined, 'public')).source, 'zhihu-public');
   await service.refreshPublic();
   assert.equal(calls, 2);
   const broken = new ZhihuService({ snapshot, fetchImpl: async () => json({}, 503) });
   await broken.refreshPublic();
-  const cached = await broken.explore('');
+  const cached = await broken.explore('', undefined, 'public');
   assert.equal(cached.source, 'zhihu-cache');
   assert.equal(cached.questions.length, 1);
   assert.equal(broken.publicError?.upstreamStatus, 503);
@@ -557,7 +557,7 @@ test('bundled snapshot has traceable real authors and excerpts for offline start
   assert.equal(bundled.details['1307332455322529792'].author_name, '潘幸知');
   assert.equal(bundled.details['1307332455322529792'].content?.length, 3000);
   const service = new ZhihuService({ snapshot: bundled, fetchImpl: async () => { throw new Error('offline'); } });
-  const response = await service.explore('');
+  const response = await service.explore('', undefined, 'public');
   assert.equal(response.source, 'zhihu-cache');
   assert.equal(response.questions.length, 3);
   const answers = response.questions.flatMap((question) => question.answers);

@@ -30,7 +30,7 @@ export function normalizeItems(raw: unknown, source: 'zhihu' | 'global', kind: C
   const entries = data.Items ?? data.items ?? data.Answers ?? data.answers;
   if (!Array.isArray(entries)) throw new ApiError(502, 'UPSTREAM_INVALID_RESPONSE', '知乎返回的内容结构无法识别。');
   const unique = new Map<string, ContentItem>();
-  for (const entry of entries.slice(0, 50)) {
+  for (const [index, entry] of entries.slice(0, 50).entries()) {
     const value = record(entry);
     const rawUrl = value.Url ?? value.URL ?? value.url ?? value.AnswerUrl;
     const validated = source === 'zhihu' ? safeZhihuUrl(rawUrl) : webUrl(rawUrl);
@@ -43,6 +43,7 @@ export function normalizeItems(raw: unknown, source: 'zhihu' | 'global', kind: C
     if (kind === 'answer_summary' && contentType !== 'answer') continue;
     const number = pathname.match(/\/(\d+)\/?$/)?.[1];
     const id = source === 'global' ? `web-${digest(url).slice(0, 20)}` : `${contentType}-${number}`;
+    if (kind === 'hot_summary' && unique.has(id)) continue;
     const author = record(value.Author);
     const title = sourcePrefix(plainText(value.Title ?? value.title ?? value.QuestionTitle), 400) || (kind === 'answer_summary' ? `${plainText(value.AuthorName ?? author.Name) || '知乎作者'}的回答` : '');
     if (!title) continue;
@@ -51,6 +52,7 @@ export function normalizeItems(raw: unknown, source: 'zhihu' | 'global', kind: C
       summary: sourcePrefix(plainText(value.ContentText ?? value.Summary ?? value.Snippet ?? value.summary ?? value.snippet, true), 12_000),
       url, source, kind, contentType, fetchedAt,
       ...((actualQuestionId ?? questionId) ? { questionId: actualQuestionId ?? questionId } : {}),
+      ...(kind === 'hot_summary' ? { hotRank: index + 1 } : {}),
     });
   }
   const paging = record(data.Paging ?? data.paging);

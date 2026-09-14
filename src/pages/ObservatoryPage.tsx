@@ -9,7 +9,7 @@ import CollectionTreeScene, { TOPICS_PER_PAGE, LEAVES_PER_PAGE } from '@/compone
 import CollectionTreeControls from '@/components/observatory/CollectionTreeControls'
 import { buildCollectionTree, type CollectionTreeLeaf } from '@/features/personal/collectionTree'
 import { collectionTreeReading } from '@/features/personal/collectionTreeReading'
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { usePersonalStore } from '@/features/personal/store'
 import type { CollectionRecord, ScenePose } from '@/features/personal/types'
@@ -36,6 +36,7 @@ import './observatory.css'
 
 const PCF_SHADOW_MAP = 1
 const ignoreSceneAction = () => {}
+const PersonalPanel = lazy(() => import('@/features/personal/PersonalPanel'))
 
 function useMedia(query: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
@@ -60,7 +61,9 @@ function LoadingProgress() {
 export default function ObservatoryPage() {
   const navigate = useNavigate()
   const location = useLocation()
-  const entry = location.state as {openWorkshop?:boolean;recipePair?:readonly [KnowledgeId,KnowledgeId]} | null
+  const entry = location.state as {openWorkshop?:boolean;recipePair?:readonly [KnowledgeId,KnowledgeId];galaxyTripId?:string} | null
+  const [voyageLogOpen, setVoyageLogOpen] = useState(false)
+  const voyageLogButton = useRef<HTMLButtonElement|null>(null)
   const [hotOpen,setHotOpen] = useState(false)
   const [hot,setHot] = useState<SearchResponse|null>(null)
   const [hotError,setHotError] = useState('')
@@ -120,7 +123,7 @@ export default function ObservatoryPage() {
     return () => window.clearTimeout(timeout)
   }, [response.id])
   const wasBlocked = useRef(false)
-  const nonTreeBlocked = !!panel || workshopOpen || hotOpen
+  const nonTreeBlocked = !!panel || workshopOpen || hotOpen || voyageLogOpen
   const blocked = nonTreeBlocked || treeOpen
   const touch = useMedia('(pointer: coarse)')
   const reducedMotion = useMedia('(prefers-reduced-motion: reduce)')
@@ -266,11 +269,14 @@ export default function ObservatoryPage() {
         </div>
       </div>
       <nav aria-label="观星台导航" className="observatory-nav">
+        {!!personalData.galaxyVoyages.length && <button ref={voyageLogButton} type="button" className="observatory-button" onClick={() => { leave(); setVoyageLogOpen(true) }}><Compass size={15}/>{entry?.galaxyTripId && personalData.galaxyVoyages.some(trip => trip.tripId === entry.galaxyTripId) ? '查看本次足迹' : '漫游足迹'}</button>}
         <button type="button" className="observatory-button" onClick={() => void loadHot()}><Sparkles size={15}/>外界的回声</button>
         <button type="button" className="observatory-button return-home" onClick={returnHome} aria-keyshortcuts="H"><ArrowLeft size={15} />返回小屋{!touch && <kbd>H</kbd>}</button>
         <button type="button" className="observatory-icon-button" aria-label="设置画质" title="设置画质" onClick={() => { leave(); useGameStore.getState().openPanel('settings') }}><Settings size={17} strokeWidth={1.5} /></button>
       </nav>
     </header>
+
+    {voyageLogOpen && <Suspense fallback={null}><PersonalPanel initialTab="journeys" initialGalaxyTripId={entry?.galaxyTripId} onClose={() => { setVoyageLogOpen(false); requestAnimationFrame(() => voyageLogButton.current?.focus()) }}/></Suspense>}
 
     {locked && <div className="observatory-reticle" aria-hidden="true" />}
     {nearHome && !blocked && <button type="button" className="observatory-return-prompt" aria-label="通过传送门返回小屋" aria-keyshortcuts="E" onClick={returnHome}>

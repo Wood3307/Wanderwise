@@ -2,7 +2,7 @@
 
 ## Wanderwise 上游
 
-星系前端与相关格式处理来源于 [Wood3307/Wanderwise](https://github.com/Wood3307/Wanderwise)，本轮锁定 [`43094bdf13282e963baa80510f7bf6de074b2af8`](https://github.com/Wood3307/Wanderwise/commit/43094bdf13282e963baa80510f7bf6de074b2af8)（星空 7.1），克隆保存在项目旁的 `Wanderwise-upstream-20260914`。原作者署名、仓库内版权与第三方说明继续适用；本项目不为上游源码另行宣称新许可证。
+星系前端与相关格式处理来源于 [Wood3307/Wanderwise](https://github.com/Wood3307/Wanderwise)，当前锁定 [`f7cea25dfaf937a34940fa64965f56352733c601`](https://github.com/Wood3307/Wanderwise/commit/f7cea25dfaf937a34940fa64965f56352733c601)（星空第八版）。原作者署名、仓库内版权与第三方说明继续适用；本项目不为上游源码另行宣称新许可证。
 
 下列来源说明基于该提交中的 README、THIRD_PARTY_NOTICES.md 和随附许可证。资源路径已适配为本项目的 `/galaxy/` 命名空间。
 
@@ -23,6 +23,8 @@ WikiGalaxy 由 Owen Cornec 创作。按上游记录，`REFERENCE/WikiGalaxy` 是
 ## 宇宙背景
 
 按上游记录，`public/galaxy/textures/cosmic-observatory-v3.webp` 由 image_gen.imagegen 生成，用户提供的三张宇宙图片作为题材、色彩和氛围参考，没有直接复制到应用中。提示词和压缩记录见该提交的 [COSMIC_ART_DIRECTION.md](https://github.com/Wood3307/Wanderwise/blob/43094bdf13282e963baa80510f7bf6de074b2af8/docs/COSMIC_ART_DIRECTION.md)。本轮沿用此背景，不宣称重新生成。
+
+平行宇宙的 `public/galaxy/textures/parallel-pillars.jpg` 来自 ESA/Hubble 的 [New view of the Pillars of Creation — visible](https://esahubble.org/images/heic1501a/)，完整署名为 **NASA, ESA/Hubble and the Hubble Heritage Team**。按 [CC BY 4.0 与发布方条款](https://esahubble.org/copyright/)使用，界面保留可见署名；源 JPEG 未修改，仅通过 CSS 压暗和裁切展示。出处见 [背景说明](galaxy-parallel-background.md)。
 
 ## 字体资源
 

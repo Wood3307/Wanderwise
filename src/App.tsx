@@ -3,6 +3,7 @@ import CanvasPage from './pages/CanvasPage'
 import { lazy, Suspense, useEffect } from 'react'
 import { initializePersonalSpace, usePersonalStore } from './features/personal/store'
 import { connectLegacyInventory } from './features/personal/legacyBridge'
+import { connectGalaxyVoyageInbox } from './features/personal/galaxyVoyages'
 
 const HomePage = lazy(() => import('./pages/HomePage'))
 const ObservatoryPage = lazy(() => import('./pages/ObservatoryPage'))
@@ -12,7 +13,17 @@ const GalaxyPage = lazy(() => import('./features/galaxy'))
 
 export default function App() {
   const ready = usePersonalStore(s => s.ready)
-  useEffect(() => { let dispose: (() => void) | undefined; let active = true; void initializePersonalSpace().then(() => { if (active) dispose = connectLegacyInventory() }); return () => { active = false; dispose?.() } }, [])
+  useEffect(() => {
+    let dispose: (() => void) | undefined
+    let active = true
+    void initializePersonalSpace().then(() => {
+      if (!active) return
+      const disconnectLegacy = connectLegacyInventory()
+      const disconnectVoyages = connectGalaxyVoyageInbox()
+      dispose = () => { disconnectVoyages(); disconnectLegacy() }
+    })
+    return () => { active = false; dispose?.() }
+  }, [])
   if (!ready) return <main className="grid min-h-screen place-items-center bg-[#101b25] text-[#e8dcc0]" role="status">正在打开你的思想家园…</main>
   return (
     <Suspense fallback={<main className="grid min-h-screen place-items-center bg-[#101b25] text-[#e8dcc0]" role="status">正在展开这片风景…</main>}><Routes>

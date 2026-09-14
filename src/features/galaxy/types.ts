@@ -1,4 +1,4 @@
-export type SourceMode = "zhihu-search" | "zhihu-public" | "zhihu-cache" | "curated";
+export type SourceMode = "zhihu-search" | "zhihu-hot" | "zhihu-public" | "zhihu-cache" | "curated";
 
 export interface Highlight {
   id: string;
@@ -35,6 +35,7 @@ export interface Question {
   url?: string;
   kind?: "question" | "topic" | "article";
   answersExpanded?: boolean;
+  hotRank?: number;
 }
 
 export interface ExploreResponse {
@@ -44,6 +45,7 @@ export interface ExploreResponse {
   source: SourceMode;
   notice?: string;
   fetchedAt: string;
+  stale?: boolean;
 }
 
 export interface QuestionResponse {

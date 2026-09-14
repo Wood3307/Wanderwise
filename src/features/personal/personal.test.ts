@@ -1,6 +1,6 @@
 import test, { beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import type { ContentSource, PersonalData } from './types'
+import type { ContentSource, GalaxyVoyage, PersonalData } from './types'
 import type { SavedItem } from '../galaxy/types'
 
 // A controlled transaction stub tests sequencing and failure handling, not browser IDB compatibility.
@@ -41,13 +41,15 @@ Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
 } })
 const { canonicalSource, safeSourceUrl, emptyPersonalData, validatePersonalData } = await import('./persistence')
 const { applyCollectionSeed, COLLECTION_SEED_VERSION } = await import('./collectionSeed')
-const { usePersonalStore, migrateLegacy, importPersonalSpace, flushPersonalData } = await import('./store')
+const { usePersonalStore, migrateLegacy, importPersonalSpace, flushPersonalData, receiveGalaxyVoyage } = await import('./store')
 const { sharedCollection, saveSharedCollection, sharedReflections, saveSharedReflections } = await import('./galaxyBridge')
 const { useGameStore } = await import('../../state/gameStore')
 const { connectLegacyInventory, readLegacyGameState } = await import('./legacyBridge')
 const { mixThoughtRecipe } = await import('../../components/observatory/gardenRecipes')
+const { groupEchoQuestions } = await import('./echoes')
 const at = '2026-09-13T08:00:00.000Z'
 const source: ContentSource = { id: 'answer-456', title: '真实来源', author: '作者', summary: '原始摘要', url: 'https://www.zhihu.com/question/123/answer/456', source: '知乎', kind: 'summary', fetchedAt: at }
+const galaxyTrip = (tripId = 'trip-one'): GalaxyVoyage => ({ version: 1, tripId, startedAt: at, endedAt: '2026-09-13T08:15:00.000Z', query: '摄影', journey: [{ id: 'answer:answer-456', type: 'answer', questionId: 'question-123', answerId: 'answer-456', title: source.title, query: '摄影', visitedAt: at, url: source.url }] })
 
 function legacyFixture(): PersonalData {
   const data = emptyPersonalData()
@@ -73,6 +75,189 @@ beforeEach(async () => {
   usePersonalStore.setState({ ready: false, data: emptyPersonalData(), error: '' })
   useGameStore.setState({ backpack: [], links: [], anchors: [] })
   records.clear(); local.clear(); writes.length = 0; failWrite = undefined; failRead = undefined
+})
+
+test('older personal profiles gain an empty exported-trip list without treating legacy visits as authorized exports', () => {
+  const data = migrateLegacy(legacyFixture())
+  const old = { ...data } as Partial<PersonalData>
+  delete old.galaxyVoyages
+  const normalized = validatePersonalData(old)
+  assert.deepEqual(normalized.galaxyVoyages, [])
+  assert.deepEqual(normalized.legacy, data.legacy)
+  assert.deepEqual(normalized.collections, data.collections)
+  assert.deepEqual(normalized.journeys, data.journeys)
+})
+
+test('exported-trip validation rejects malformed records, strips unsafe links and deduplicates by original trip receipt', () => {
+  const first = galaxyTrip()
+  const data = { ...emptyPersonalData(), galaxyVoyages: [first, { ...first, query: 'conflicting later retry' }, { ...galaxyTrip('trip-two'), journey: [{ ...first.journey[0], url: 'javascript:alert(1)' }] }] }
+  const normalized = validatePersonalData(data)
+  assert.equal(normalized.galaxyVoyages.length, 2)
+  assert.equal(normalized.galaxyVoyages.find(trip => trip.tripId === first.tripId)?.query, first.query)
+  assert.equal(normalized.galaxyVoyages.find(trip => trip.tripId === 'trip-two')?.journey[0].url, undefined)
+  assert.throws(() => validatePersonalData({ ...data, galaxyVoyages: [{ ...first, endedAt: 'invalid date' }] }))
+  assert.throws(() => validatePersonalData({ ...data, galaxyVoyages: [{ ...first, journey: new Array(1001).fill(first.journey[0]) }] }))
+})
+
+test('receiving an exported galaxy trip commits independently and preserves collections, notes, recipes, journeys and old visits', async () => {
+  const before = migrateLegacy(legacyFixture())
+  usePersonalStore.setState({ ready: true, data: before })
+  const trip = galaxyTrip()
+  const receipt = receiveGalaxyVoyage(trip)
+  assert.equal(writes.length, 0, 'receipt may not claim synchronous IndexedDB persistence')
+  await receipt
+  const stored = validatePersonalData(records.get('profile'))
+  assert.deepEqual(stored.galaxyVoyages, [trip])
+  assert.deepEqual({ ...stored, galaxyVoyages: [] }, before)
+  assert.ok(writes.some(write => write.key === 'profile' && write.committed))
+  await receiveGalaxyVoyage({ ...trip, query: 'a stale conflicting retry' })
+  assert.deepEqual(usePersonalStore.getState().data.galaxyVoyages, [trip])
+  assert.deepEqual(validatePersonalData(records.get('profile')).galaxyVoyages, [trip])
+})
+
+test('failed galaxy receipt rejects until a real transaction succeeds, and retry does not duplicate the in-memory receipt', async () => {
+  usePersonalStore.setState({ ready: true })
+  const trip = galaxyTrip()
+  failWrite = key => key === 'profile'
+  await assert.rejects(receiveGalaxyVoyage(trip), /Injected transaction failure/)
+  await flushPersonalData()
+  assert.equal(records.has('profile'), false)
+  assert.match(usePersonalStore.getState().error, /尚未保存/)
+  failWrite = undefined
+  await receiveGalaxyVoyage(trip)
+  await flushPersonalData()
+  assert.equal(usePersonalStore.getState().error, '')
+  assert.deepEqual(validatePersonalData(records.get('profile')).galaxyVoyages, [trip])
+})
+
+test('concurrent galaxy receipts and personal edits share the write queue without losing notes or either trip', async () => {
+  usePersonalStore.setState({ ready: true })
+  const first = receiveGalaxyVoyage(galaxyTrip('first'))
+  usePersonalStore.getState().saveNote({ id: 'between-receipts', title: '保留手记', text: '在导入时写下的文字' })
+  const second = receiveGalaxyVoyage(galaxyTrip('second'))
+  await Promise.all([first, second])
+  await flushPersonalData()
+  const stored = validatePersonalData(records.get('profile'))
+  assert.deepEqual(new Set(stored.galaxyVoyages.map(trip => trip.tripId)), new Set(['first', 'second']))
+  assert.equal(stored.notes[0].id, 'between-receipts')
+  assert.deepEqual(stored, usePersonalStore.getState().data)
+})
+
+test('personal-space backup imports merge separate galaxy trips, keep the first receipt, and retain unrelated data', async () => {
+  const current = migrateLegacy(legacyFixture())
+  current.galaxyVoyages = [galaxyTrip('first')]
+  usePersonalStore.setState({ ready: true, data: current })
+  const incoming = { ...emptyPersonalData(), galaxyVoyages: [{ ...galaxyTrip('first'), query: 'must not overwrite' }, galaxyTrip('second')] }
+  await importPersonalSpace(JSON.stringify(incoming))
+  await flushPersonalData()
+  const stored = validatePersonalData(records.get('profile'))
+  assert.equal(stored.galaxyVoyages.length, 2)
+  assert.equal(stored.galaxyVoyages.find(trip => trip.tripId === 'first')?.query, '摄影')
+  assert.deepEqual(stored.collections, current.collections)
+  assert.deepEqual(stored.notes, current.notes)
+  assert.deepEqual(stored.legacy, current.legacy)
+  assert.deepEqual(validatePersonalData(JSON.parse(JSON.stringify(stored))), stored)
+})
+
+test('land reading progress and echo authors survive galaxy receipt, old-profile migration and backup imports together', async () => {
+  const before = migrateLegacy(legacyFixture())
+  const secondSource = canonicalSource({ ...source, id: 'answer-789', author: '另一位作者', url: 'https://www.zhihu.com/question/123/answer/789' })
+  before.sources[secondSource.id] = secondSource
+  const sourceId = canonicalSource(source).id
+  before.reading = { [sourceId]: { paragraph: 2, updatedAt: at } }
+  const old = { ...before } as Partial<PersonalData>
+  delete old.galaxyVoyages
+  const migrated = migrateLegacy(validatePersonalData(old))
+  assert.deepEqual(migrated.reading, before.reading)
+  assert.deepEqual(migrated.galaxyVoyages, [])
+  usePersonalStore.setState({ ready: true, data: migrated })
+  const receipt = receiveGalaxyVoyage(galaxyTrip('combined-first'))
+  usePersonalStore.getState().saveReading(sourceId, 7.8)
+  usePersonalStore.getState().saveReading(secondSource.id, 3)
+  await receipt
+  await flushPersonalData()
+  const saved = validatePersonalData(records.get('profile'))
+  assert.equal(saved.reading?.[sourceId].paragraph, 7)
+  assert.equal(saved.reading?.[secondSource.id].paragraph, 3)
+  assert.equal(saved.galaxyVoyages[0].tripId, 'combined-first')
+  const incoming = structuredClone(saved)
+  incoming.reading![sourceId] = { paragraph: 1, updatedAt: at }
+  incoming.reading![secondSource.id] = { paragraph: 9, updatedAt: '2030-01-01T00:00:00.000Z' }
+  incoming.galaxyVoyages = [galaxyTrip('combined-second')]
+  await importPersonalSpace(JSON.stringify(incoming))
+  await flushPersonalData()
+  const restored = validatePersonalData(JSON.parse(JSON.stringify(records.get('profile'))))
+  assert.deepEqual(new Set(restored.galaxyVoyages.map(trip => trip.tripId)), new Set(['combined-first', 'combined-second']))
+  assert.equal(restored.reading?.[sourceId].paragraph, 7, 'an older backup cannot rewind recent reading')
+  assert.equal(restored.reading?.[secondSource.id].paragraph, 9, 'newer backup progress is restored')
+  const echo = groupEchoQuestions(Object.values(restored.sources)).find(group => group.id === 'question-123')!
+  assert.deepEqual(new Set(echo.answers.map(answer => answer.author)), new Set([source.author, secondSource.author]))
+  assert.deepEqual(restored.notes, before.notes)
+  assert.deepEqual(restored.collections, before.collections)
+})
+
+test('a personal import cannot discard a concurrently acknowledged galaxy trip or reading update', async () => {
+  usePersonalStore.setState({ ready: true, data: migrateLegacy(legacyFixture()) })
+  const sourceId = canonicalSource(source).id
+  usePersonalStore.getState().saveReading(sourceId, 2)
+  await flushPersonalData()
+  const incoming = emptyPersonalData()
+  incoming.notes.push({ id: 'imported-note', title: '导入手记', text: '来自个人备份', createdAt: at, updatedAt: at })
+  const importing = importPersonalSpace(JSON.stringify(incoming))
+  const receipt = receiveGalaxyVoyage(galaxyTrip('during-import'))
+  usePersonalStore.getState().saveReading(sourceId, 11)
+  await Promise.all([importing, receipt])
+  await flushPersonalData()
+  const saved = validatePersonalData(records.get('profile'))
+  assert.equal(saved.galaxyVoyages[0]?.tripId, 'during-import')
+  assert.equal(saved.reading?.[sourceId].paragraph, 11)
+  assert.ok(saved.notes.some(note => note.id === 'imported-note'))
+  assert.deepEqual(saved, usePersonalStore.getState().data)
+})
+
+test('an export arriving during the import transaction is committed before its outbox can be acknowledged', async () => {
+  usePersonalStore.setState({ ready: true, data: migrateLegacy(legacyFixture()) })
+  const sourceId = canonicalSource(source).id
+  const incoming = emptyPersonalData()
+  incoming.notes.push({ id: 'mid-write-import', title: '正在导入', text: '不能被旧快照覆盖', createdAt: at, updatedAt: at })
+  let injected = false
+  let receipt: Promise<GalaxyVoyage> | undefined
+  let importReportedSuccess = false
+  const regressions: PersonalData[] = []
+  failWrite = (key, value) => {
+    if (key === 'profile' && importReportedSuccess && !(value as PersonalData).notes.some(note => note.id === 'mid-write-import')) regressions.push(value as PersonalData)
+    if (key === 'profile' && !injected && (value as PersonalData).notes.some(note => note.id === 'mid-write-import')) {
+      injected = true
+      receipt = receiveGalaxyVoyage(galaxyTrip('during-transaction'))
+      usePersonalStore.getState().saveReading(sourceId, 17)
+    }
+    return false
+  }
+  await importPersonalSpace(JSON.stringify(incoming))
+  importReportedSuccess = true
+  assert.ok(injected && receipt, 'inject the new trip after the import captured its write snapshot')
+  await receipt
+  await flushPersonalData()
+  assert.deepEqual(regressions, [], 'after import reports success, queued older snapshots must never erase its durable notes')
+  const saved = validatePersonalData(records.get('profile'))
+  assert.equal(saved.galaxyVoyages[0]?.tripId, 'during-transaction')
+  assert.equal(saved.reading?.[sourceId].paragraph, 17)
+  assert.ok(saved.notes.some(note => note.id === 'mid-write-import'))
+  assert.deepEqual(saved, usePersonalStore.getState().data)
+})
+
+test('canonicalizing old source aliases keeps the latest reading progress alongside exported trips', () => {
+  const old = aliasFixture()
+  const [firstAlias, secondAlias] = Object.keys(old.sources)
+  old.galaxyVoyages = [galaxyTrip('alias-trip')]
+  old.reading = {
+    [firstAlias]: { paragraph: 12, updatedAt: '2026-09-14T09:00:00.000Z' },
+    [secondAlias]: { paragraph: 2, updatedAt: '2026-09-13T09:00:00.000Z' },
+  }
+  const normalized = validatePersonalData(old)
+  assert.deepEqual(normalized.reading, { [canonicalSource(source).id]: old.reading[firstAlias] })
+  assert.deepEqual(normalized.galaxyVoyages, old.galaxyVoyages)
+  assert.deepEqual(validatePersonalData(normalized), normalized)
 })
 
 test('canonical URL identity deduplicates tracking links and rejects executable URLs and credentials', () => {

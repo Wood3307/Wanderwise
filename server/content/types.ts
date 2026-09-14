@@ -9,6 +9,7 @@ export interface ContentItem {
   fetchedAt: string;
   contentType?: 'answer' | 'question' | 'article' | 'webpage';
   questionId?: string;
+  hotRank?: number;
 }
 
 export interface ContentResponse {

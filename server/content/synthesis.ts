@@ -8,6 +8,8 @@ function text(value: unknown, max: number): string { return typeof value === 'st
 export class SynthesisService {
   private active = 0;
   constructor(private readonly content: ContentService, private readonly limits = { global: 50, perVisitor: 10 }, private readonly now = Date.now) {}
+  /** Optional host AI features consume the same configured visitor/global quota. */
+  reserveBudget(actor: string) { this.content.store.reserve('ai', actor, this.limits.global, this.limits.perVisitor); }
   async generate(raw: unknown, actor: string) {
     const input = raw as Partial<SynthesisInput> | undefined;
     if (!input || !['idea', 'journey'].includes(input.mode ?? '') || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 2000 || (input.personalText !== undefined && (typeof input.personalText !== 'string' || input.personalText.length > 8000)) || (input.realmId !== undefined && (typeof input.realmId !== 'string' || !/^[a-z][a-z0-9-]{0,60}$/.test(input.realmId)))) throw new ApiError(400, 'INVALID_SYNTHESIS_INPUT', '请提供合成方式、问题和不超过 8000 字的个人材料。');
@@ -19,7 +21,7 @@ export class SynthesisService {
     });
     if (!this.content.configured) throw new ApiError(503, 'AI_UNAVAILABLE', 'AI 服务暂未连接，可继续使用精选旅程与手动创作。');
     if (this.active >= 2) throw new ApiError(429, 'AI_BUSY', '正在合成其他想法，请稍后重试。');
-    this.content.store.reserve('ai', actor, this.limits.global, this.limits.perVisitor);
+    this.reserveBudget(actor);
     this.active++;
     try {
       const instruction = input.mode === 'idea'

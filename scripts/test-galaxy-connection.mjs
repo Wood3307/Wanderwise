@@ -44,7 +44,7 @@ function replaceGlobal(name, value) { Object.defineProperty(globalThis, name, { 
 function host({ locationState = null, returnAnchor = null, sources = {}, journeys = [] } = {}) {
   const navigations = [], assignments = [], effects = [], refs = []
   const journeyUpdates = [], returnAnchors = []
-  const personalState = { ready: true, error: '', data: { returnAnchor, sources, journeys, poses: {}, collections: [], notes: [], works: [], interests: [], settings: { muted: true, mascotAnimated: true, mascotHints: true } } }
+  const personalState = { ready: true, error: '', data: { returnAnchor, sources, journeys, galaxyVoyages: [], poses: {}, collections: [], notes: [], works: [], interests: [], settings: { muted: true, mascotAnimated: true, mascotHints: true } } }
   personalState.setReturn = anchor => { personalState.data.returnAnchor = anchor; returnAnchors.push(structuredClone(anchor)) }
   personalState.updateJourney = (id, patch) => {
     journeyUpdates.push({ id, patch: structuredClone(patch) })
@@ -56,13 +56,16 @@ function host({ locationState = null, returnAnchor = null, sources = {}, journey
   let panelClosures = 0, pointerReleases = 0
   gameState.panel = 'settings'
   gameState.closePanel = () => { gameState.panel = null; panelClosures++ }
+  const sessionValues = new Map()
   const window = Object.assign(new EventTarget(), {
     localStorage: memoryStorage,
+    sessionStorage: { getItem: key => sessionValues.get(key) ?? null, setItem: (key, value) => sessionValues.set(key, String(value)), removeItem: key => sessionValues.delete(key) },
+    performance: { getEntriesByType: () => [{ type: 'navigate' }] },
     location: { origin: 'https://galaxy.test', href: 'https://galaxy.test/galaxy', search: '', assign: url => assignments.push(url) },
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   })
   const document = { title: 'Cabin integration test', pointerLockElement: {}, exitPointerLock() { this.pointerLockElement = null; pointerReleases++ } }
-  const harness = { effects, refs, gameState, personalState, journeyUpdates, returnAnchors, location: { state: locationState },
+  const harness = { effects, refs, gameState, personalState, journeyUpdates, returnAnchors, sessionValues, location: { state: locationState, key: 'entry-one' },
     navigate: (...args) => navigations.push(args), navigations, assignments,
     get panelClosures() { return panelClosures }, get pointerReleases() { return pointerReleases } }
   replaceGlobal('window', window); replaceGlobal('document', document); replaceGlobal('CustomEvent', LocalCustomEvent)
@@ -112,6 +115,7 @@ async function componentModule(path, realDependencies = []) {
     export const initializePersonalSpace=async()=>{};`
   for (const name of ['@/features/personal/store', '../personal/store', '../../personal/store', './features/personal/store']) mocks[name] = personalStore
   mocks['./features/personal/legacyBridge'] = 'export const connectLegacyInventory=()=>()=>{};'
+  mocks['./features/personal/galaxyVoyages'] = 'export const connectGalaxyVoyageInbox=()=>()=>{};'
   mocks['@/features/personal/api'] = 'export const api=()=>{throw new Error("Unexpected API call from host callback test")};'
   // Existing legacy-persistence assertions intentionally exercise the fallback
   // adapter. Only the shared adapter is mocked for these host callbacks; the
@@ -170,7 +174,7 @@ try {
     loader.import('../src/features/galaxy/lib/integration.ts', import.meta.url),
   ])
   const [observatory, galaxy, app] = await Promise.all([
-    componentModule('src/pages/ObservatoryPage.tsx', ['@/components/observatory/gardenRecipes', '@/features/personal/collectionTree', '../../components/observatory/gardenRecipes']), componentModule('src/features/galaxy/index.tsx'), componentModule('src/App.tsx'),
+    componentModule('src/pages/ObservatoryPage.tsx', ['@/components/observatory/gardenRecipes', '@/features/personal/collectionTree', '../../components/observatory/gardenRecipes']), componentModule('src/features/galaxy/index.tsx', ['./lib/trip']), componentModule('src/App.tsx'),
   ])
   for (const seed of [null, structuredClone(legacyState.seed)]) {
     const h = host(); h.gameState.seed = seed
@@ -283,6 +287,26 @@ try {
   }
   check('Direct /galaxy visits ignore stale return anchors and default to observatory; all three new feature routes are genuinely lazy')
 
+  const sessionHost = host()
+  const routedGalaxy = interactiveComponent(sessionHost, galaxy.default)
+  routedGalaxy.render()
+  const tripKey = 'wanderwise.trip-session.v1'
+  const firstSession = JSON.parse(sessionHost.sessionValues.get(tripKey))
+  sessionHost.location.state = { wanderwiseEntry: true }
+  routedGalaxy.render()
+  assert.equal(JSON.parse(sessionHost.sessionValues.get(tripKey)).id, firstSession.id, 'a render or search state update within the same Router entry must retain its session')
+  sessionHost.location.key = 'entry-two'
+  routedGalaxy.render()
+  const nextSession = JSON.parse(sessionHost.sessionValues.get(tripKey))
+  assert.notEqual(nextSession.id, firstSession.id, 'a new SPA route entry must start a fresh session')
+  assert.deepEqual(nextSession.journey, [])
+  const exported = { version: 1, tripId: 'deliberate-export', query: '单次足迹', startedAt: '2026-09-14T00:00:00.000Z', endedAt: '2026-09-14T00:10:00.000Z', journey: [] }
+  integration.returnToObservatory({ query: '', returnUrl: '/observatory' }, { trip: exported })
+  assert.deepEqual(sessionHost.navigations.at(-1), ['/observatory', { state: { stationId: undefined, galaxyTripId: exported.tripId } }])
+  assert.deepEqual(sessionHost.personalState.data.galaxyVoyages, [], 'return navigation alone must not import history; the durable global inbox owns receipt')
+  routedGalaxy.dispose()
+  check('New SPA entry keys create separate trips; rerender/search keeps the same trip and only an explicit export marks the return log shortcut')
+
   const received = [], previousBridge = { enter() {}, hostVersion: 'integration-test' }
   window.Wanderwise = previousBridge
   const removeBridge = integration.registerObservatoryEntry(entry => received.push(entry))
@@ -326,9 +350,10 @@ try {
   const health = await json('/api/health')
   assert.equal(health.ok, true); assert.equal(health.configured, false); assert.equal(health.model.configured, false)
   assert.equal(health.publicCount, snapshot.items.length)
-  const discovery = await json('/api/explore?q=')
+  await json('/api/explore?q=', 503)
+  const discovery = await json('/api/explore?q=&mode=public')
   assert.equal(discovery.query, ''); assert.equal(discovery.source, 'zhihu-cache')
-  assert.ok(discovery.questions.length > 0, 'empty query/no credentials must still show public topics')
+  assert.ok(discovery.questions.length > 0, 'explicit public mode must still show verified topics without credentials; default hot entry must not silently replace hot questions')
   const corpusIds = new Set(snapshot.items.map(item => item.work_id)), answers = []
   for (const topic of discovery.questions) {
     assert.equal(topic.kind, 'topic', 'public collections must not be misrepresented as one real Zhihu question')
@@ -378,7 +403,7 @@ try {
   report.publicCorpus = { works: snapshot.items.length, topics: discovery.questions.length, inspectedArticles: answers.length, excerptCount: highlights.highlights.length }
   check(`Real local HTTP: ${discovery.questions.length} public topics / ${answers.length} articles, exact paragraphs/highlights, errors and ${spaPaths.length} direct SPA URLs including land/journey reloads; same-name /galaxy directory does not redirect, asset bytes stay intact and missing assets return 404; no external requests`)
 
-  const explorer = await componentModule('src/features/galaxy/App.tsx', ['./lib/integration', './lib/storage', './lib/search-voyage'])
+  const explorer = await componentModule('src/features/galaxy/App.tsx', ['./lib/integration', './lib/storage', './lib/search-voyage', './lib/trip', './trip', './lib/useJourneyExitGuard', './lib/useWormhole', './wormhole'])
   const returnHarness = host(), returnTitle = document.title
   // Event targets stand in for DOM inputs; the keyboard handler itself is the
   // actual component effect. Modal state is entered through its real controls.
@@ -421,7 +446,15 @@ try {
   const expectReturn = (properties = {}) => {
     const before = returnHarness.navigations.length
     assert.equal(keyboard(properties).defaultPrevented, true)
-    assert.equal(returnHarness.navigations.length, before + 1, 'one H press must produce exactly one router transition')
+    if (returnHarness.navigations.length === before) {
+      interactive.render()
+      assert.ok(elements(interactive.tree).some(element => element.props.title === '是否导出漫游足迹'), 'a dirty trip must offer the export choice before navigating')
+      const discard = elements(interactive.tree).find(element => element.type === 'button' && element.props.children === '不导出，返回观星台')
+      assert.ok(discard, 'the user can return without authorizing an export')
+      discard.props.onClick()
+      interactive.render()
+    }
+    assert.equal(returnHarness.navigations.length, before + 1, 'one confirmed return must produce exactly one router transition')
     assert.deepEqual(returnHarness.navigations.at(-1), defaultReturn)
     assert.deepEqual(returnHarness.assignments, [], 'integrated return must not trigger a full-page navigation')
   }
@@ -455,6 +488,8 @@ try {
     expectBlockedReturn({}, 'H must not interrupt an open article reader')
     keyboard({ key: 'Escape' }); interactive.render()
     expectReturn()
+    elements(interactive.tree).find(element => element.type === './components/GalaxyScene').props.onDepthChange(2)
+    interactive.render()
     findButton('留下思考').props.onClick(); interactive.render()
     expectBlockedReturn({}, 'H must not interrupt a reflection dialog')
     keyboard({ key: 'Escape' }); interactive.render()

@@ -1,14 +1,17 @@
 # Wanderwise galaxy integration
 
-This directory vendors the galaxy frontend from [Wood3307/Wanderwise](https://github.com/Wood3307/Wanderwise), branch `main`, commit [`43094bdf13282e963baa80510f7bf6de074b2af8`](https://github.com/Wood3307/Wanderwise/commit/43094bdf13282e963baa80510f7bf6de074b2af8), titled “星空7.1版本：字体调大，markdown修复（还未完成），黑洞吞噬动效优化”. The source checkout is `../Wanderwise-upstream-20260914`, alongside the host app. The preceding integrated baseline was `229e4bd1a9623fa6a10f53387f31259434823976`. Preserve upstream authorship and applicable notices; no new source license is asserted here.
+This directory vendors the galaxy frontend from [Wood3307/Wanderwise](https://github.com/Wood3307/Wanderwise), branch `main`, commit [`f7cea25dfaf937a34940fa64965f56352733c601`](https://github.com/Wood3307/Wanderwise/commit/f7cea25dfaf937a34940fa64965f56352733c601), titled “星空第八版”. It is integrated into the land application from `20260914` at [`88c847cd14bb33dc149ac1b31f16e141f3c69f79`](https://github.com/Wood3307/Wanderwise/commit/88c847cd14bb33dc149ac1b31f16e141f3c69f79). The previous vendored galaxy version was `43094bdf13282e963baa80510f7bf6de074b2af8` (7.1). Preserve upstream authorship and applicable notices; no new source license is asserted here. Runtime does not depend on sibling checkouts.
 
 This document records the integration scope and host contracts. Checklists are required validation, not a claim that the current update has already passed tests, browser review or deployment.
 
-## Upstream v6–v7.1 changes
+## Integrated galaxy v8 features
 
+- Parallel cosmos: related keywords become varied wormholes on a locally served Pillars background. Pointer drag and wheel/pinch zoom replace the retired tesseract and aircraft controls; entry and exit share a blue-white transit with actual first-frame readiness.
+- Current hot questions: initial empty-query entry uses the Zhihu hot list, with real answers expanded only after choosing a question.
+- Single-trip history: each host entry starts its own trip; explicit exports enter the host personal log after durable receipt.
 - Search voyage: keep the old scene through disintegration and black-hole absorption, then reveal the latest result with a burst and expanding light. Requests run alongside animation; superseded results must never replace the latest query. Reduced motion switches directly.
 - More separated galaxy placement, no decorative inter-galaxy lines, and revised intermittent comet motion around the outer stellar system.
-- Larger Chinese reading text with Zhuque Fangsong; Markdown/LaTeX presentation, format-aware excerpt handling, and glyph sampling that accounts for rendered mathematics. Raw source strings remain the values used by selection, saving and reflection. The upstream 7.1 commit explicitly describes Markdown repair as unfinished; do not claim complete syntax support without validation.
+- Larger Chinese reading text with Zhuque Fangsong; Markdown/LaTeX presentation, format-aware excerpt handling, and glyph sampling that accounts for rendered mathematics. Raw source strings remain the values used by selection, saving and reflection. Keep the tested Markdown/LaTeX behavior and literal source strings; do not infer complete support for untested syntax.
 - Background music and its controls. The host integration uses `/galaxy/audio/`, obeys the host muted preference, and distinguishes enabled playback intent from actual browser playback. See the host third-party notice for audio provenance and authorization limits.
 
 ## Host mounting, routes and entry
@@ -31,7 +34,9 @@ The host waits for `initializePersonalSpace()` before mounting routes. The `wand
 
 - `wanderwise.collection.v1`: up to 500 visible saved groups.
 - `wanderwise.reflections.v1`: up to 500 visible notes.
-- `wanderwise.journey.v1`: legacy galaxy visit history; loader limit 1000, App rolling limit 300. This is distinct from the host's playable journey instances.
+- `wanderwise.journey.v1`: preserved legacy galaxy visit history, no longer loaded or extended as the active trip. Current trips use tab-scoped session storage. Deliberately exported trips are acknowledged into the host's independent `galaxyVoyages` list only after IndexedDB commits; they are distinct from playable recipe journeys.
+
+The wrapper associates a new SPA `location.key` with a new trip and keys the explorer accordingly. Renders and searches preserving the Router key keep the same trip. First entry within a document uses normal session initialization so a browser reload can restore its unfinished trip. The host-wide inbox remains active on the observatory and cabin routes and drains authorized exports independently of route return events.
 
 The original documentation's statement that galaxy and cabin collections are separate is obsolete. The shared bridge connects the cabin, collection tree, land and galaxy while existing migrations retain old game and cocktail data.
 
@@ -64,6 +69,12 @@ Runtime images, fonts and audio are local and namespaced under `/galaxy/`. Zhuqu
 The explicit return button keeps a visible destination label and H shortcut. Typing, composition, modifiers and active reader/dialog states must not trigger a return. Preserve focus restoration, modal `inert` behavior and safe back/forward handling.
 
 Honor reduced motion for search voyage, glyph effects, rotation and comets; retain usable manual navigation. Honor the host muted setting rather than importing the upstream default as permission to start audible playback. Reading and input pause autonomous motion without losing navigation.
+
+Content-bearing bodies follow the active depth and label page. Overview shows question galaxies without their answer spheres; the answer layer shows only the selected question's current-page stars; article depth retains its title star and current-page paragraph planets. Hide off-page orbits and click targets with their bodies, while retaining all source records and pagination. Keep the host's typography, colors, background and ambient effects intact.
+
+The lower-left wormhole connects every depth to a parallel cosmos of semantic wormholes. Reuse the original query as its association seed and pass a selected-topic search response directly into the explorer, retaining Router state, trip ID and source identities. Navigation uses pointer dragging, wheel zoom and touch pinch; hovering or former flight keys must not rotate or propel the camera. Remove tesseract/wall geometry and its aircraft controls. Five portal morphologies share the existing world projection and readable horizontal labels, with an original-topic portal for return. The official Pillars background is local and visibly credited; see `docs/galaxy-parallel-background.md`.
+
+Both entry and exit use the same blue-white shader, duration and readiness-gated reveal. Pre-render the destination behind the opaque transit and match readiness to the current topic set or result. The original galaxy stays suspended and hidden through entry, parallel exploration and departure; returning restores its camera memory. Cancellation, unmount and successful trip completion invalidate pending requests. Keep visible content minimal; do not reintroduce tutorial chrome. The host association endpoint respects existing access and CLI AI budgets, with direct signed-visitor access and the same AI visitor/global budget used by synthesis; failed or unavailable model calls fall back to semantic expansion. See `docs/galaxy-wormhole-exploration.md`.
 
 `GalaxyScene` owns its renderer, animation loop, observers, input/visibility listeners and temporary GPU systems. Dispose them on route unmount; cancel pending requests and glyph frames, and stop/release route-owned audio. Resource disposal stays idempotent. Do not keep the observatory renderer mounted behind the galaxy or lose a reused canvas context during a routine layout rebuild.
 

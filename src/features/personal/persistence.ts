@@ -1,11 +1,18 @@
 import { z } from 'zod'
 import type { ContentSource, PersonalData } from './types'
+import { normalizeJourneyExport } from '../galaxy/lib/trip'
+import { MAX_GALAXY_VOYAGES, mergeGalaxyVoyages } from './galaxyVoyageData'
 
 const string = z.string().max(60_000)
 const pose = z.object({ position: z.tuple([z.number().finite(), z.number().finite(), z.number().finite()]), yaw: z.number().finite(), pitch: z.number().finite() })
 const ingredient = z.enum(['literature', 'photography', 'philosophy', 'nature', 'music'])
 const recipe = z.object({ id: string, first: ingredient, second: ingredient, firstPercent: z.number().min(10).max(90), name: string, prompt: string })
 const source = z.object({ contentType:z.enum(['answer','question','article','webpage']).optional(), id: string, remoteId: string.optional(), title: string, author: string, summary: string, url: string, source: string, kind: z.enum(['summary','article','question','excerpt','curated']), fetchedAt: string, tags: z.array(string).optional(), readingGuide: string.optional(), legacyWorkId: string.optional(), galaxy: z.object({id:string,type:z.enum(['question','answer']),questionId:string,answerId:string.optional(),query:string}).optional() })
+const galaxyVoyage = z.unknown().transform((value, context) => {
+  const packet = normalizeJourneyExport(value)
+  if (!packet) { context.addIssue({ code: 'custom', message: '漫游足迹格式无效' }); return z.NEVER }
+  return packet
+})
 export const personalSchema = z.object({
   version: z.literal(1), migrated: z.boolean(), sources: z.record(z.string(), source),
   collectionSeedVersions: z.array(z.string().max(100)).max(100).optional(),
@@ -14,6 +21,7 @@ export const personalSchema = z.object({
   notes: z.array(z.object({id:string,sourceId:string.optional(),title:string,text:string,quote:string.optional(),createdAt:string,updatedAt:string})).max(5000),
   works: z.array(z.object({id:string,title:string,text:string,sourceIds:z.array(string),journeyId:string.optional(),createdAt:string,kind:z.enum(['idea','journey'])})).max(2000),
   journeys: z.array(z.object({id:string,realmId:string,title:string,recipe,personalText:string,contentVersion:z.number(),sourceIds:z.array(string),createdAt:string,progress:z.object({visited:z.array(string),drafts:z.record(z.string(), string),completed:z.boolean(),pose:pose.optional(),activeStation:string.optional()})})).max(1000),
+  galaxyVoyages: z.array(galaxyVoyage).max(MAX_GALAXY_VOYAGES).default([]),
   recipes:z.array(recipe),interests:z.array(string),returnAnchor:z.object({route:z.string().regex(/^\/(observatory|land|journey\/[a-z-]+)$/),label:string,journeyId:string.optional(),stationId:string.optional(),sourceId:string.optional(),pose:pose.optional()}).nullable(),
   poses:z.record(z.string(), pose),settings:z.object({mascotAnimated:z.boolean(),mascotHints:z.boolean(),muted:z.boolean()}),legacy:z.record(z.string(), z.unknown()),
 })
@@ -78,10 +86,11 @@ export async function writeVault(key: string, value: unknown): Promise<void> {
   return new Promise((resolve, reject) => { const tx = db.transaction('vault', 'readwrite'); tx.objectStore('vault').put(value, key); tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error) })
 }
 export function emptyPersonalData(): PersonalData {
-  return {version:1,migrated:false,sources:{},collections:[],notes:[],works:[],journeys:[],recipes:[],interests:[],returnAnchor:null,poses:{},settings:{mascotAnimated:true,mascotHints:true,muted:true},legacy:{}}
+  return {version:1,migrated:false,sources:{},collections:[],notes:[],works:[],journeys:[],galaxyVoyages:[],recipes:[],interests:[],returnAnchor:null,poses:{},settings:{mascotAnimated:true,mascotHints:true,muted:true},legacy:{}}
 }
 export function validatePersonalData(value: unknown): PersonalData {
   const result = personalSchema.parse(value) as PersonalData
+  result.galaxyVoyages = mergeGalaxyVoyages([], result.galaxyVoyages)
   const aliases = new Map<string, string>()
   const normalized: Record<string, ContentSource> = {}
   for (const [key, item] of Object.entries(result.sources)) {
@@ -96,7 +105,14 @@ export function validatePersonalData(value: unknown): PersonalData {
   }
   const remap = (id: string) => aliases.get(id) ?? id
   result.sources = normalized
-  if (result.reading) result.reading = Object.fromEntries(Object.entries(result.reading).map(([id, progress])=>[remap(id),progress]).filter(([id])=>typeof id==='string'&&normalized[id]))
+  if (result.reading) {
+    const reading: NonNullable<PersonalData['reading']> = {}
+    for (const [alias, progress] of Object.entries(result.reading)) {
+      const id = remap(alias)
+      if (normalized[id] && (!reading[id] || progress.updatedAt > reading[id].updatedAt)) reading[id] = progress
+    }
+    result.reading = reading
+  }
   result.collections = result.collections.map((item) => ({ ...item, sourceId: remap(item.sourceId) }))
   result.notes = result.notes.map((note) => note.sourceId ? { ...note, sourceId: remap(note.sourceId) } : note)
   result.works = result.works.map((work) => ({ ...work, sourceIds: [...new Set(work.sourceIds.map(remap))] }))

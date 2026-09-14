@@ -5,7 +5,7 @@ import type { CollectionRecord, ContentSource, PersonalData } from './types'
 
 const at = '2026-09-14T05:30:00.000Z'
 function empty(): PersonalData {
-  return { version: 1, migrated: true, sources: {}, collections: [], notes: [], works: [], journeys: [], recipes: [], interests: [], returnAnchor: null,
+  return { version: 1, migrated: true, sources: {}, collections: [], notes: [], works: [], journeys: [], galaxyVoyages: [], recipes: [], interests: [], returnAnchor: null,
     poses: {}, settings: { mascotAnimated: false, mascotHints: false, muted: true }, legacy: {} }
 }
 function source(id: string, overrides: Partial<ContentSource> = {}): ContentSource {

@@ -9,6 +9,7 @@ import type { SearchResponse, SynthesisResponse } from './api'
 import type { ContentSource, PersonalNote, PersonalWork } from './types'
 import { exportPersonalSpace, importPersonalSpace, usePersonalStore } from './store'
 import SourceCard from './SourceCard'
+import GalaxyVoyageLog from './GalaxyVoyageLog'
 import './personal.css'
 import './workspaces.css'
 
@@ -152,10 +153,11 @@ function WorksView({ onCreate, onClose }: { onCreate: () => void; onClose: () =>
   return <div className="ms-split"><div className="ms-index"><button className="ms-button" onClick={onCreate}><Plus size={15}/> 写新作品</button>{works.map(item => <button key={item.id} className={`ms-index-item ${work.id === item.id ? 'is-selected' : ''}`} onClick={() => setSelected(item.id)}><strong>{item.title}</strong><span>{item.kind === 'journey' ? '旅程创作' : '我的想法'} · {date(item.createdAt)}</span></button>)}</div><WorkEditor key={work.id} work={work} onClose={onClose}/></div>
 }
 
-function JourneysView({ onClose }: { onClose: () => void }) {
+function JourneysView({ onClose, selectedGalaxyTripId }: { onClose: () => void; selectedGalaxyTripId?: string }) {
   const journeys = usePersonalStore(s => s.data.journeys)
+  const galaxyVoyages = usePersonalStore(s => s.data.galaxyVoyages)
   const navigate = useNavigate()
-  return <div className="ms-stack">{journeys.map((journey, index) => <article key={journey.id} className="ms-journey"><span className="ms-journey-number">{String(journeys.length - index).padStart(2, '0')}</span><div className="ms-grow"><p className="ms-eyebrow">{date(journey.createdAt)} · {journey.progress.completed ? '已完成' : '等待继续'}</p><h3>{journey.title}</h3><p>{journey.personalText || journey.recipe.prompt}</p><span className="ms-muted">走过 {journey.progress.visited.length} 个停靠点 · 收录 {journey.sourceIds.length} 份材料</span></div><button className="ms-button" onClick={() => { onClose(); navigate(`/journey/${journey.realmId}?trip=${encodeURIComponent(journey.id)}`) }}>{journey.progress.completed ? '再走一遍' : '继续漫游'}<ArrowUpRight size={16}/></button></article>)}{!journeys.length && <Empty>到观星台调一杯酒吧。它会带你去一个属于这份配方的世界，足迹也会留在这里。</Empty>}</div>
+  return <div className="ms-stack"><GalaxyVoyageLog selectedTripId={selectedGalaxyTripId}/>{journeys.map((journey, index) => <article key={journey.id} className="ms-journey"><span className="ms-journey-number">{String(journeys.length - index).padStart(2, '0')}</span><div className="ms-grow"><p className="ms-eyebrow">{date(journey.createdAt)} · {journey.progress.completed ? '已完成' : '等待继续'}</p><h3>{journey.title}</h3><p>{journey.personalText || journey.recipe.prompt}</p><span className="ms-muted">走过 {journey.progress.visited.length} 个停靠点 · 收录 {journey.sourceIds.length} 份材料</span></div><button className="ms-button" onClick={() => { onClose(); navigate(`/journey/${journey.realmId}?trip=${encodeURIComponent(journey.id)}`) }}>{journey.progress.completed ? '再走一遍' : '继续漫游'}<ArrowUpRight size={16}/></button></article>)}{!journeys.length && !galaxyVoyages.length && <Empty>从观星台出发吧。你选择导出的星空足迹和配方旅程，会分别留在这里。</Empty>}</div>
 }
 
 function InterestsView() {
@@ -226,7 +228,7 @@ function SynthesisView() {
   </div>
 }
 
-export default function PersonalPanel({ initialTab = 'collections', onClose, workspace }: { initialTab?: PersonalTab; onClose?: () => void; workspace?: Workspace }) {
+export default function PersonalPanel({ initialTab = 'collections', initialGalaxyTripId, onClose, workspace }: { initialTab?: PersonalTab; initialGalaxyTripId?: string; onClose?: () => void; workspace?: Workspace }) {
   const [tab, setTab] = useState<PersonalTab>(initialTab)
   const [transferNotice, setTransferNotice] = useState('')
   const data = usePersonalStore(s => s.data)
@@ -242,13 +244,13 @@ export default function PersonalPanel({ initialTab = 'collections', onClose, wor
   const openSearch = () => workspace ? useGameStore.getState().openPanel('mascot') : setTab('search')
   const openSynthesis = () => workspace ? useGameStore.getState().openPanel('synth') : setTab('synthesis')
   const active = TABS.find(item => item.id === tab)!
-  const counts: Partial<Record<PersonalTab, number>> = { collections: data.collections.length, notes: data.notes.length, works: data.works.length, journeys: data.journeys.length }
+  const counts: Partial<Record<PersonalTab, number>> = { collections: data.collections.length, notes: data.notes.length, works: data.works.length, journeys: data.journeys.length + data.galaxyVoyages.length }
   return <Dialog open onOpenChange={open => { if (!open) close() }}><DialogContent className={`ms-personal ${workspace?`home-workspace workspace-${workspace}`:''}`} showCloseButton={false}>
     <header className="ms-panel-header"><span className="ms-panel-seal"><BookOpen size={22} strokeWidth={1.3}/></span><div className="ms-grow"><p className="ms-eyebrow">WANDERWISE · 我的精神小屋</p><DialogTitle>{desk?.title ?? '把世界的回声，留在这里'}</DialogTitle><DialogDescription>{desk?.description ?? '收藏、手记与作品，保存在当前浏览器的个人空间。'}</DialogDescription></div><button className="ms-close" onClick={close} aria-label="关闭个人空间"><X size={20}/></button></header>
     <div className="ms-panel-layout"><nav className="ms-panel-nav" aria-label="个人空间栏目">{tabs.map(({ id, name, icon: Icon }) => <button key={id} aria-current={tab === id ? 'page' : undefined} className={tab === id ? 'is-active' : ''} onClick={() => setTab(id)}><Icon size={17}/><span>{name}</span>{counts[id] !== undefined && <small>{counts[id]}</small>}</button>)}<div className="ms-nav-foot"><span>灯火里，慢慢生长。</span><p>小屋是你的私人空间。</p></div></nav>
       <main className="ms-panel-main" key={tab}><div className="ms-section-heading"><active.icon size={20} strokeWidth={1.4}/><div><h2>{active.name}</h2><p>{active.subtitle}</p></div></div>
         {storageError && <div className="ms-error" role="alert">{storageError}<button className="ms-button" onClick={exportPersonalSpace}><Download size={14}/> 导出个人空间</button></div>}
-        {!ready ? <p className="ms-notice" role="status">正在打开个人空间……</p> : tab === 'reading' ? <ReadingView/> : tab === 'search' ? <SearchView/> : tab === 'collections' ? <CollectionsView onSearch={openSearch}/> : tab === 'notes' ? <NotesView/> : tab === 'works' ? <WorksView onCreate={openSynthesis} onClose={close}/> : tab === 'journeys' ? <JourneysView onClose={close}/> : tab === 'interests' ? <InterestsView/> : <SynthesisView/>}
+        {!ready ? <p className="ms-notice" role="status">正在打开个人空间……</p> : tab === 'reading' ? <ReadingView/> : tab === 'search' ? <SearchView/> : tab === 'collections' ? <CollectionsView onSearch={openSearch}/> : tab === 'notes' ? <NotesView/> : tab === 'works' ? <WorksView onCreate={openSynthesis} onClose={close}/> : tab === 'journeys' ? <JourneysView onClose={close} selectedGalaxyTripId={initialGalaxyTripId}/> : tab === 'interests' ? <InterestsView/> : <SynthesisView/>}
       </main></div>
     <footer className="ms-panel-footer"><span role="status">{transferNotice || '本机保存 · 可导出备份与迁移'}</span><div><button className="ms-button" onClick={exportPersonalSpace}><Download size={14}/> 导出</button><button className="ms-button" onClick={() => fileInput.current?.click()}><Upload size={14}/> 导入</button><input ref={fileInput} type="file" accept="application/json,.json" className="ms-file-input" aria-label="导入个人空间 JSON" onChange={async event => { const file = event.target.files?.[0]; event.target.value = ''; if (!file) return; if (file.size > 12_000_000) { setTransferNotice('文件过大，请选择 12 MB 以内的个人空间 JSON。'); return } try { await importPersonalSpace(await file.text()); if (mounted.current) setTransferNotice('已合并个人空间，原有数据已自动备份。') } catch (error) { if (mounted.current) setTransferNotice(`导入未完成：${errorText(error)}`) } }}/></div></footer>
   </DialogContent></Dialog>

@@ -1,9 +1,11 @@
 {
   "repository": "https://github.com/Wood3307/Wanderwise",
   "branch": "main",
-  "commit": "43094bdf13282e963baa80510f7bf6de074b2af8",
-  "version": "7.1",
-  "host": "Wanderwise v4",
-  "integratedAt": "2026-09-14",
-  "release": "galaxy-v71-43094bd-20260914"
+  "commit": "f7cea25dfaf937a34940fa64965f56352733c601",
+  "version": "8",
+  "host": "Wanderwise integrated land and galaxy",
+  "hostBranch": "20260914",
+  "hostBaseCommit": "88c847cd14bb33dc149ac1b31f16e141f3c69f79",
+  "integratedAt": "2026-09-15",
+  "release": "land-88c847c-galaxy-v8-f7cea25-20260915"
 }
