@@ -872,7 +872,7 @@ button.galaxy-hub-title:hover {
   opacity: 0.8;
 }
 .galaxy-spatial .galaxy-hub-title {
-  font-size: 22px;
+  font-size: 23px;
   line-height: 1.6;
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -880,7 +880,7 @@ button.galaxy-hub-title:hover {
   overflow: hidden;
 }
 .galaxy-spatial .galaxy-hub-article .galaxy-hub-title {
-  font-size: 20px;
+  font-size: 21px;
   line-height: 1.6;
 }
 .galaxy-spatial .galaxy-hub-kind {
@@ -906,14 +906,14 @@ button.galaxy-hub-title:hover {
   height: 24px;
 }
 .galaxy-spatial .galaxy-label-title {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.8;
 }
 .galaxy-spatial .galaxy-content-1 .galaxy-label-title {
   -webkit-line-clamp: 3;
 }
 .galaxy-spatial .galaxy-label-paragraph .galaxy-label-title {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.85;
   display: -webkit-box;
   -webkit-line-clamp: 6;
@@ -992,7 +992,7 @@ button.galaxy-hub-title:hover {
     width: 250px;
   }
   .galaxy-spatial .galaxy-hub-title {
-    font-size: 20px;
+    font-size: 21px;
   }
 }
 @media (max-width: 760px) {
@@ -1007,7 +1007,7 @@ button.galaxy-hub-title:hover {
   }
   .galaxy-spatial .galaxy-hub-title,
   .galaxy-spatial .galaxy-hub-article .galaxy-hub-title {
-    font-size: 17px;
+    font-size: 18px;
     line-height: 1.6;
     -webkit-line-clamp: 3;
   }
@@ -1030,7 +1030,7 @@ button.galaxy-hub-title:hover {
   }
   .galaxy-spatial .galaxy-label-title,
   .galaxy-spatial .galaxy-label-paragraph .galaxy-label-title {
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.85;
     -webkit-line-clamp: 4;
   }

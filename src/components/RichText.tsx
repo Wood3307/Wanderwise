@@ -58,8 +58,10 @@ function renderTokens(tokens: Token[], compact: boolean, prefix = ''): ReactNode
         ? <span className="rich-pre" key={key}><code>{token.content.trimEnd()}</code></span>
         : <pre key={key}><code>{token.content.trimEnd()}</code></pre>);
       else if (token.type === 'math_inline' || token.type === 'math_display') nodes.push(
+        // Compact labels change CSS layout, never TeX's display semantics:
+        // align/equation environments require displayMode even in a label.
         <span key={key} className={`rich-math ${token.type === 'math_display' && !compact ? 'rich-math-display' : ''}`}
-          dangerouslySetInnerHTML={{ __html: renderMath(token.content, token.type === 'math_display' && !compact) }} />,
+          dangerouslySetInnerHTML={{ __html: renderMath(token.content, token.type === 'math_display') }} />,
       );
       else if (token.type === 'softbreak' || token.type === 'hardbreak') nodes.push(<br key={key} />);
       else if (token.type === 'hr') nodes.push(compact ? <span key={key} className="rich-rule"> · </span> : <hr key={key} />);

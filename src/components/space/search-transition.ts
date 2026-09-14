@@ -8,6 +8,10 @@ export interface TransitionAnchor {
   color?: string;
   /** Visible body radius in the same world units as position. */
   radius?: number;
+  /** Preserved visible stellar geometry, packed world-space xyz coordinates. */
+  fragmentPositions?: Float32Array;
+  /** Optional matching linear RGB colors from the original geometry. */
+  fragmentColors?: Float32Array;
 }
 
 export interface SearchTransitionFrame {
@@ -37,10 +41,10 @@ function phaseFor(progress: number, index: number, count: number) {
 }
 
 /**
- * A decaying helical infall, expressed in the camera's view plane. Early motion
- * accelerates quadratically, then the final tight turn vanishes at the horizon.
- * It never orbits at the original source radius (which would throw an entire
- * galaxy outside the viewport). `out` permits allocation-free particle updates.
+ * Gravity draws detached material directly inward. Angular momentum only
+ * becomes apparent very close to capture, where the remaining radius is tiny.
+ * A rotation of an exactly shrinking radius guarantees monotonic approach;
+ * there is no initial sideways orbit or bend away from the black hole.
  */
 function infall(
   out: THREE.Vector3,
@@ -52,7 +56,7 @@ function infall(
   const p = clamp(progress);
   if (p === 0) return out.copy(source);
   if (p === 1) return out.copy(target);
-  const travel = p * p;
+  const remaining = 1 - Math.pow(p, 1.8);
   const dx = source.x - target.x;
   const dy = source.y - target.y;
   const dz = source.z - target.z;
@@ -63,15 +67,13 @@ function infall(
   const tx = normal.y * pz - normal.z * py;
   const ty = normal.z * px - normal.x * pz;
   const tz = normal.x * py - normal.y * px;
-  // A broad, shallow tidal arc tightens into one last curl at capture.
-  const bend = Math.sin(Math.PI * p) * travel * 0.31;
-  const turn = p * p * 5.7;
-  const radial = 1 - travel + bend * Math.sin(turn) * 0.48;
-  const tangential = bend * (1.25 + Math.cos(turn));
+  const turn = smooth(p, 0.7, 1) * 0.22 + smooth(p, 0.92, 1) * 0.62;
+  const radial = remaining * Math.cos(turn);
+  const tangential = remaining * Math.sin(turn);
   out.set(
-    target.x + px * radial + tx * tangential + normal.x * axial * (1 - travel),
-    target.y + py * radial + ty * tangential + normal.y * axial * (1 - travel),
-    target.z + pz * radial + tz * tangential + normal.z * axial * (1 - travel),
+    target.x + px * radial + tx * tangential + normal.x * axial * remaining,
+    target.y + py * radial + ty * tangential + normal.y * axial * remaining,
+    target.z + pz * radial + tz * tangential + normal.z * axial * remaining,
   );
   return out;
 }
@@ -89,7 +91,7 @@ export function sampleCollapse(options: {
   position: THREE.Vector3;
   target: THREE.Vector3;
   normal: THREE.Vector3;
-  /** The saved base orientation lets the tidal axis follow the infall direction. */
+  /** Accepted for the preserved caller contract; whole bodies no longer turn. */
   orientation?: THREE.Quaternion;
   progress: number;
   index: number;
@@ -99,28 +101,15 @@ export function sampleCollapse(options: {
   const normal = options.normal.clone();
   if (normal.lengthSq() < 0.000001) normal.set(0, 0, -1);
   normal.normalize();
-  const shrink = Math.max(0, 1 - Math.pow(p, 1.72));
-  const tide = smooth(p, 0.12, 0.69) * (1 - smooth(p, 0.74, 1));
+  const shrink = Math.max(0, 1 - Math.pow(p, 2.4));
   const point = infall(new THREE.Vector3(), options.position, options.target, normal, p);
-  const tangent = infall(new THREE.Vector3(), options.position, options.target, normal, clamp(p + 0.004))
-    .sub(infall(new THREE.Vector3(), options.position, options.target, normal, clamp(p - 0.004)));
-  const rotation = new THREE.Quaternion();
-  if (tangent.lengthSq() > 0.000001) {
-    const major = new THREE.Vector3(1, 0, 0);
-    if (options.orientation) major.applyQuaternion(options.orientation);
-    const alignment = new THREE.Quaternion().setFromUnitVectors(major.normalize(), tangent.normalize());
-    rotation.slerp(alignment, smooth(p, 0.06, 0.78) * 0.93);
-  }
   return {
     position: point,
-    // Volume declines while a long, narrowing major axis becomes a tidal stream.
-    scale: new THREE.Vector3(
-      shrink * (1 + tide * 1.65),
-      shrink * (1 - tide * 0.67),
-      shrink * (1 - tide * 0.52),
-    ),
-    rotation,
-    opacity: 1 - smooth(p, 0.48, 0.995),
+    // The intact galaxy dissolves early instead of rotating into a stretched
+    // cardboard silhouette. Actual sampled stars carry the rest of the fall.
+    scale: new THREE.Vector3(shrink, shrink, shrink),
+    rotation: new THREE.Quaternion(),
+    opacity: 1 - smooth(p, 0.035, 0.43),
     progress: p,
   };
 }
@@ -215,12 +204,15 @@ export function createSearchTransition(options: {
   const group = new THREE.Group();
   group.name = "knowledge-search-transition";
   group.visible = false;
-  const particleCount = options.mobile ? 660 : 1560;
+  // Keep the praised supernova's seeds and draw count exactly as before. Infall
+  // adds two trailing glints per grain in the same fixed GPU draw batch.
+  const birthParticleCount = options.mobile ? 660 : 1560;
+  const particleCount = birthParticleCount * 3;
   const maxStreams = options.mobile ? 10 : 20;
-  const ribbonCount = options.mobile ? 1 : 2;
+  const ribbonCount = options.mobile ? 2 : 3;
   const segments = options.mobile ? 26 : 38;
   const random = seededRandom("wanderwise-tidal-fragments-v8");
-  const seeds = Array.from({ length: particleCount }, () => ({
+  const seeds = Array.from({ length: birthParticleCount }, () => ({
     angle: random() * TAU,
     radial: Math.sqrt(random()),
     depth: random() - 0.5,
@@ -262,26 +254,43 @@ export function createSearchTransition(options: {
     .setUsage(THREE.DynamicDrawUsage);
   const ribbonIntensities = new THREE.BufferAttribute(new Float32Array(ribbonVertices), 1)
     .setUsage(THREE.DynamicDrawUsage);
+  const ribbonEdges = new THREE.BufferAttribute(new Float32Array(ribbonVertices), 1);
+  const ribbonFlow = new THREE.BufferAttribute(new Float32Array(ribbonVertices), 1)
+    .setUsage(THREE.DynamicDrawUsage);
   ribbonGeometry.setAttribute("position", ribbonPositions);
   ribbonGeometry.setAttribute("color", ribbonColors);
   ribbonGeometry.setAttribute("intensity", ribbonIntensities);
+  ribbonGeometry.setAttribute("edge", ribbonEdges);
+  ribbonGeometry.setAttribute("flow", ribbonFlow);
   const ribbonMaterial = transparentShader({
     side: THREE.DoubleSide,
+    uniforms: { uTime: { value: 0 } },
     vertexShader: `
       attribute vec3 color;
       attribute float intensity;
+      attribute float edge;
+      attribute float flow;
       varying vec3 vColor;
       varying float vIntensity;
+      varying float vEdge;
+      varying float vFlow;
       void main() {
         vColor = color; vIntensity = intensity;
+        vEdge = edge; vFlow = flow;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: `
       varying vec3 vColor;
       varying float vIntensity;
+      varying float vEdge;
+      varying float vFlow;
+      uniform float uTime;
       void main() {
-        gl_FragColor = vec4(vColor, vIntensity);
+        float feather = exp(-vEdge * vEdge * 5.5) * (1.0 - smoothstep(0.74, 1.0, abs(vEdge)));
+        float knots = 0.62 + 0.24 * sin(vFlow * 44.0 - uTime * 21.0)
+                           + 0.14 * sin(vFlow * 93.0 - uTime * 34.0);
+        gl_FragColor = vec4(vColor, vIntensity * feather * knots);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -297,11 +306,12 @@ export function createSearchTransition(options: {
   geometries.add(planeGeometry);
   const horizonMaterial = transparentShader({
     vertexShader: planeVertex,
-    uniforms: { uTime: { value: 0 }, uOpacity: { value: 0 } },
+    uniforms: { uTime: { value: 0 }, uOpacity: { value: 0 }, uStorm: { value: 0 } },
     fragmentShader: `
       varying vec2 vUv;
       uniform float uTime;
       uniform float uOpacity;
+      uniform float uStorm;
       void main() {
         vec2 p = (vUv - 0.5) * 2.0;
         p = mat2(0.978, -0.208, 0.208, 0.978) * p;
@@ -312,7 +322,15 @@ export function createSearchTransition(options: {
         float flow = 0.70 + 0.30 * sin(angle * 3.0 - uTime * 2.8 + circle * 18.0);
         float veil = exp(-circle * circle * 7.0) * smoothstep(0.23, 0.32, circle) * 0.16;
         float beaming = 0.44 + 0.56 * smoothstep(-0.8, 0.65, p.x);
-        float alpha = (ring * 0.32 + lens * 0.48 + veil) * beaming * flow;
+        // Inward streaks grow into a ragged, shearing accretion eye. The dark
+        // center stays clear, while the outer dust feeds the pre-existing rim.
+        float feedAngle = angle * 6.0 + log(max(circle, 0.08)) * 14.0 + uTime * 7.5;
+        float striations = pow(0.5 + 0.5 * sin(feedAngle), 9.0)
+                         * (0.64 + 0.36 * sin(angle * 17.0 - uTime * 3.0 + circle * 36.0));
+        float feeding = smoothstep(0.26, 0.36, circle) * (1.0 - smoothstep(0.42, 0.94, circle));
+        float storm = (striations * 0.30 + exp(-pow((circle - 0.36) * 8.0, 2.0)) * 0.06) * feeding;
+        float alpha = (ring * 0.32 + lens * 0.48 + veil) * beaming * flow
+                    + storm * uStorm;
         vec3 color = mix(vec3(0.30, 0.65, 1.0), vec3(1.0, 0.84, 0.60), smoothstep(-0.2, 0.2, p.x));
         gl_FragColor = vec4(color, alpha * uOpacity * (1.0 - smoothstep(0.8, 1.0, circle)));
         #include <tonemapping_fragment>
@@ -373,6 +391,23 @@ export function createSearchTransition(options: {
   const violet = new THREE.Color("#bea0fa");
   let disposed = false;
 
+  function fragmentSource(anchor: TransitionAnchor, sample: number, extent: number, seed: typeof seeds[number]) {
+    const packed = anchor.fragmentPositions;
+    const count = packed ? Math.floor(packed.length / 3) : 0;
+    const offset = count ? (sample % count) * 3 : -1;
+    if (packed && offset >= 0 && Number.isFinite(packed[offset])
+      && Number.isFinite(packed[offset + 1]) && Number.isFinite(packed[offset + 2])) {
+      source.set(packed[offset], packed[offset + 1], packed[offset + 2]);
+      return offset;
+    }
+    const radius = Math.min(extent * 0.2, Math.max(extent * 0.009, anchor.radius ?? extent * 0.065));
+    source.copy(anchor.position)
+      .addScaledVector(right, Math.cos(seed.angle) * seed.radial * radius)
+      .addScaledVector(up, Math.sin(seed.angle) * seed.radial * radius * 0.7)
+      .addScaledVector(normal, seed.depth * radius * 0.26);
+    return -1;
+  }
+
   group.traverse((object) => {
     object.userData.decoration = true;
     object.raycast = () => {};
@@ -399,6 +434,7 @@ export function createSearchTransition(options: {
     horizon.visible = phase !== "birth";
     horizonMaterial.uniforms.uTime.value = time;
     horizonMaterial.uniforms.uOpacity.value = phase === "wait" ? 0.66 : smooth(p, 0, 0.3) * 0.86;
+    horizonMaterial.uniforms.uStorm.value = phase === "wait" ? 0.34 : smooth(p, 0.10, 0.50) * (1 - smooth(p, 0.88, 1) * 0.66);
     nova.position.copy(center);
     nova.quaternion.copy(camera.quaternion);
     nova.scale.setScalar(extent * 1.62);
@@ -411,23 +447,35 @@ export function createSearchTransition(options: {
 
     const activeCount = Math.min(maxStreams, anchors.length);
     const burstFade = smooth(p, 0.04, 0.14) * (1 - smooth(p, 0.50, 0.98));
-    const collapseFade = smooth(p, 0.025, 0.17) * (1 - smooth(p, 0.91, 1));
-    for (let index = 0; index < particleCount; index++) {
-      const seed = seeds[index];
-      const anchorIndex = index % Math.max(1, activeCount);
+    const collapseFade = smooth(p, 0.005, 0.13) * (1 - smooth(p, 0.97, 1));
+    const count = phase === "birth" ? birthParticleCount : particleCount;
+    particleGeometry.setDrawRange(0, count);
+    for (let index = 0; index < count; index++) {
+      const grain = index % birthParticleCount;
+      const trail = Math.floor(index / birthParticleCount);
+      const seed = seeds[grain];
+      const anchorIndex = grain % Math.max(1, activeCount);
       const anchor = anchors[anchorIndex];
       if (phase === "collapse" && anchor) {
         const local = phaseFor(p, anchorIndex, activeCount);
-        const age = clamp(local - seed.phase * local * (1 - local) * 0.76);
-        const radius = Math.min(extent * 0.2, Math.max(extent * 0.009, anchor.radius ?? extent * 0.065));
-        source.copy(anchor.position)
-          .addScaledVector(right, Math.cos(seed.angle) * seed.radial * radius)
-          .addScaledVector(up, Math.sin(seed.angle) * seed.radial * radius * 0.7)
-          .addScaledVector(normal, seed.depth * radius * 0.26);
+        const offset = fragmentSource(anchor, Math.floor(grain / Math.max(1, activeCount)), extent, seed);
+        // Different release times rip the original arms into many narrow flows:
+        // early material accelerates away while late grains preserve the source
+        // silhouette. A pair of dim trailing glints lends each grain momentum.
+        const release = seed.phase * 0.22;
+        const headAge = clamp((local - release) / (1 - release));
+        const age = clamp(headAge - trail * 0.011 * smooth(headAge, 0.04, 0.65));
         infall(point, source, target, normal, age);
-        color.set(anchor.color || "#94c9ff").lerp(warm, smooth(age, 0.44, 1) * 0.72);
-        intensities.setX(index, collapseFade * (0.22 + seed.phase * 0.48) * (1 - smooth(age, 0.96, 1)));
-        sizes.setX(index, seed.size * (extent / 520) * (0.84 + age * 0.6));
+        if (offset >= 0 && anchor.fragmentColors && anchor.fragmentColors.length > offset + 2) {
+          color.setRGB(anchor.fragmentColors[offset], anchor.fragmentColors[offset + 1], anchor.fragmentColors[offset + 2]);
+        } else color.set(anchor.color || "#94c9ff");
+        // A restrained cool scattering light keeps detached material visible
+        // before capture heating; most of each source's real color survives.
+        color.lerp(ice, smooth(local, 0.03, 0.20) * 0.18)
+          .lerp(warm, smooth(age, 0.50, 1) * 0.76);
+        intensities.setX(index, collapseFade * (0.48 + seed.phase * 0.46)
+          * (1 - smooth(headAge, 0.988, 1)) * (trail === 0 ? 1 : trail === 1 ? 0.32 : 0.13));
+        sizes.setX(index, seed.size * (extent / 520) * (0.93 + age * 0.78) * 1.10 * (trail === 0 ? 1 : 0.81));
       } else {
         const travel = 1 - Math.pow(1 - p, 2.35);
         const radius = extent * (0.10 + seed.radial * 0.44) * travel * seed.speed;
@@ -446,23 +494,27 @@ export function createSearchTransition(options: {
     positions.needsUpdate = colors.needsUpdate = sizes.needsUpdate = intensities.needsUpdate = true;
     if (phase !== "collapse") return;
 
+    ribbonMaterial.uniforms.uTime.value = time;
     let cursor = 0;
     for (let index = 0; index < activeCount; index++) {
       const anchor = anchors[index];
       const local = phaseFor(p, index, activeCount);
-      const span = local * (1 - local) * 0.82;
-      const envelope = collapseFade * smooth(local, 0.06, 0.28);
-      color.set(anchor.color || "#96cfff").lerp(warm, 0.44);
+      const span = local * (1 - local) * 1.35;
+      const envelope = collapseFade * smooth(local, 0.12, 0.39);
+      color.set(anchor.color || "#96cfff").lerp(warm, 0.32);
       for (let filament = 0; filament < ribbonCount; filament++) {
-        source.copy(anchor.position).addScaledVector(up, (filament - 0.5) * extent * 0.012);
+        const seed = seeds[(index * 127 + filament * 293) % birthParticleCount];
+        fragmentSource(anchor, filament * 31 + index * 7, extent, seed);
+        const release = filament * 0.067;
+        const head = clamp((local - release) / (1 - release));
         for (let segment = 0; segment < segments; segment++) {
           const t = segment / segments;
           const next = (segment + 1) / segments;
-          infall(point, source, target, normal, clamp(local - span * (1 - t)));
-          infall(point2, source, target, normal, clamp(local - span * (1 - next)));
+          infall(point, source, target, normal, clamp(head - span * (1 - t)));
+          infall(point2, source, target, normal, clamp(head - span * (1 - next)));
           side.copy(point2).sub(point).cross(normal).normalize();
-          const width = extent * (filament ? 0.00048 : 0.00105) * Math.sin(Math.PI * t) * (1 - local * 0.65);
-          const alpha = envelope * Math.pow(Math.sin(Math.PI * t), 1.2) * (filament ? 0.11 : 0.18);
+          const width = extent * (filament ? 0.0014 : 0.0027) * Math.sin(Math.PI * t) * (1 - head * 0.76);
+          const alpha = envelope * Math.pow(Math.sin(Math.PI * t), 1.2) * (filament ? 0.14 : 0.23);
           // Two triangles per strip segment; small tapered strands avoid hard
           // lines and remain visibly detached from knowledge/relationship links.
           for (let vertex = 0; vertex < 6; vertex++) {
@@ -472,6 +524,8 @@ export function createSearchTransition(options: {
             ribbonPositions.setXYZ(cursor, base.x + side.x * width * sign, base.y + side.y * width * sign, base.z + side.z * width * sign);
             ribbonColors.setXYZ(cursor, color.r, color.g, color.b);
             ribbonIntensities.setX(cursor, alpha);
+            ribbonEdges.setX(cursor, sign);
+            ribbonFlow.setX(cursor, (atEnd ? next : t) + filament * 0.71 + index * 0.34);
             cursor++;
           }
         }
@@ -479,6 +533,7 @@ export function createSearchTransition(options: {
     }
     ribbonGeometry.setDrawRange(0, cursor);
     ribbonPositions.needsUpdate = ribbonColors.needsUpdate = ribbonIntensities.needsUpdate = true;
+    ribbonEdges.needsUpdate = ribbonFlow.needsUpdate = true;
   }
 
   return {

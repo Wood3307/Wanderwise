@@ -27,11 +27,12 @@ const question: Question = {
   id: 'question-rich-8', title: String.raw`**引力**与 $\frac{a}{b}$ 如何联系？`, excerpt: '测试富文本', keywords: ['引力'], relevance: .9,
   color: '#b7ddeb', answers: [answer], kind: 'question', answersExpanded: true,
 };
-async function prepare(page: Page) {
-  await page.route('**/api/explore?**', route => route.fulfill({ json: { query: '', keywords: ['引力'], source: 'zhihu-search', fetchedAt: '2026-09-14T00:00:00Z', questions: [question] } }));
+async function prepare(page: Page, sourceQuestion = question) {
+  const sourceAnswer = sourceQuestion.answers[0];
+  await page.route('**/api/explore?**', route => route.fulfill({ json: { query: '', keywords: ['引力'], source: 'zhihu-search', fetchedAt: '2026-09-14T00:00:00Z', questions: [sourceQuestion] } }));
   await page.route('**/api/health', route => route.fulfill({ json: { ok: true, configured: true, publicCount: 10, model: { configured: false } } }));
-  await page.route('**/api/questions/**', route => route.fulfill({ json: { question } }));
-  await page.route('**/api/answers/*/highlights?**', route => route.fulfill({ json: { answerId: answer.id, highlights: answer.highlights, method: 'extractive' } }));
+  await page.route('**/api/questions/**', route => route.fulfill({ json: { question: sourceQuestion } }));
+  await page.route('**/api/answers/*/highlights?**', route => route.fulfill({ json: { answerId: sourceAnswer.id, highlights: sourceAnswer.highlights, method: 'extractive' } }));
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('.galaxy-content-enter .galaxy-label-title strong')).toHaveText('引力');
 }
@@ -87,4 +88,48 @@ test('self-hosted Fangsong and the rendered formula glyphs participate in both d
   await expect(departing).toHaveAttribute('data-math-glyph-count', /^[1-9]\d*$/);
   await expect(page.locator('.galaxy-content-exit')).toHaveCount(0);
   await expect(page.locator('.galaxy-content-enter .galaxy-hub-title .katex')).toBeVisible();
+});
+
+test('multiline LaTeX renders exact aligned and cases expressions in labels and the reader without KaTeX errors', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const aligned = String.raw`\begin{align*}
+a_i &= b_i + c_i \\
+
+x &= \frac{1}{2}
+\end{align*}`;
+  const cases = String.raw`
+f(x) = \begin{cases}
+x^2 & x > 0 \\
+
+0 & x \le 0
+\end{cases}
+`;
+  const fenced = String.raw`\begin{pmatrix}a & b \\ c & d\end{pmatrix}`;
+  const sourceParagraphs = [aligned, `$$${cases}$$`, '```latex\n' + fenced + '\n```', String.raw`令 $2$ 个样本满足 $ x_i $；价格 $20 和 $30，代码 ` + '`$not_math$`' + ' 保留。'];
+  const sourceAnswer: Answer = { ...answer, paragraphs: sourceParagraphs, excerpt: sourceParagraphs[0],
+    highlights: sourceParagraphs.map((text, index) => ({ id: `advanced-${index}`, text, paragraphIndex: index })) };
+  await prepare(page, { ...question, answers: [sourceAnswer] });
+  await page.locator('.galaxy-content-enter').getByRole('button', { name: `进入星系：${question.title}`, exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await page.locator('.galaxy-content-enter').getByRole('button', { name: `阅读观点：${answer.title}`, exact: true }).focus();
+  await page.keyboard.press('Enter');
+  const firstLabel = page.locator('.galaxy-content-enter .galaxy-label-paragraph').first();
+  const annotation = 'annotation[encoding="application/x-tex"]';
+  await expect(firstLabel.locator(annotation)).toBeAttached();
+  expect(await firstLabel.locator(annotation).textContent()).toBe(aligned);
+  await expect(page.locator('.galaxy-content-enter .katex-error')).toHaveCount(0);
+  await expect(firstLabel.locator('.katex .mord').first()).toBeVisible();
+  await expect.poll(() => firstLabel.locator('canvas').getAttribute('data-math-glyph-count')).toMatch(/^[1-9]\d*$/);
+  await page.keyboard.press('f');
+  const reader = page.getByRole('dialog', { name: '原文阅览', exact: true });
+  await expect(reader).toBeVisible();
+  await expect(reader.locator('.katex-error')).toHaveCount(0);
+  const renderedParagraphs = reader.locator('.reader-paragraph');
+  for (const [index, expression] of [aligned, cases, fenced].entries()) {
+    expect(await renderedParagraphs.nth(index).locator(annotation).textContent()).toBe(expression);
+    await expect(renderedParagraphs.nth(index).locator('.katex-display')).toHaveCount(1);
+  }
+  expect(await renderedParagraphs.nth(3).locator(annotation).allTextContents()).toEqual(['2', ' x_i ']);
+  await expect(renderedParagraphs.nth(3)).toContainText('价格 $20 和 $30');
+  await expect(renderedParagraphs.nth(3).locator('code')).toHaveText('$not_math$');
 });

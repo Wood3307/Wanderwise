@@ -3,6 +3,7 @@ import * as THREE from "three";
 import type { Answer, Highlight, Question } from "../types";
 import StellarText from "./StellarText";
 import CosmicBackdrop from "./CosmicBackdrop";
+import { sampleStellarFragments } from "./space/fragments";
 import { BIRTH_MS, COLLAPSE_MS, type SearchVoyage } from "../lib/search-voyage";
 import { hasRichSyntax } from "../lib/rich-text";
 import { createSearchTransition, sampleBirth, sampleCollapse, type TransitionAnchor } from "./space/search-transition";
@@ -740,7 +741,8 @@ export default function GalaxyScene(props: GalaxySceneProps) {
         const anchor = (id: string, object: THREE.Object3D, color: string, radius: number): TransitionAnchor[] => {
           const pose = infallPoses.get(object);
           return pose && pose.opacity > 0.001 && object.visible
-            ? [{ id, position: pose.position.clone(), color, radius: radius * Math.max(pose.scale.x, pose.scale.y) }]
+            ? [{ id, position: pose.position.clone(), color, radius: radius * Math.max(pose.scale.x, pose.scale.y),
+              ...sampleStellarFragments(object, mobile ? 180 : 420) }]
             : [];
         };
         transitionAnchors = level === 2 && a

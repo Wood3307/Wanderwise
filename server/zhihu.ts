@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Answer, ExploreResponse, Question, QuestionResponse, SourceMode } from '../src/types.js';
 import { extractHighlights } from './highlights.js';
+import { sourceLiterals, sourcePrefix } from './source-format.js';
 
 const PUBLIC_BASE = 'https://api.zhihu.com/km-indep-home/hackathon/v2/knowledge';
 const SEARCH_URL = 'https://developer.zhihu.com/api/v1/content/zhihu_search';
@@ -61,6 +62,54 @@ function decodeEntities(value: string): string {
   });
 }
 
+/** Recover explicit source TeX only; no remote image fetching or inference. */
+function equationMarkup(source: string, protect: (value: string) => string, restore: (value: string) => string): string {
+  const tags = /<(img|span|math)\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+  let result = '', offset = 0, match: RegExpExecArray | null;
+  while ((match = tags.exec(source))) {
+    const tag = match[0];
+    const attribute = (name: string) => {
+      const found = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(tag);
+      const value = found?.[1] ?? found?.[2] ?? found?.[3];
+      return value === undefined ? undefined : decodeEntities(restore(value));
+    };
+    let formula = attribute('data-tex') || attribute('data-latex');
+    const isImage = match[1].toLowerCase() === 'img';
+    if (!formula && isImage && (/\bztext-math\b/i.test(attribute('class') ?? '') || attribute('eeimg') !== undefined)) formula = attribute('alt');
+    if (!formula && isImage) {
+      for (const name of ['src', 'data-src', 'data-original', 'data-actualsrc']) {
+        const value = attribute(name);
+        if (!value) continue;
+        try {
+          const url = new URL(value, 'https://www.zhihu.com');
+          if (url.protocol === 'https:' && ['zhihu.com', 'www.zhihu.com'].includes(url.hostname)
+            && !url.username && !url.password && !url.port && url.pathname === '/equation') formula = url.searchParams.get('tex') ?? undefined;
+        } catch { /* An invalid image URL is not a formula source. */ }
+        if (formula) break;
+      }
+    }
+    if (!formula?.trim() || formula.length > 4000) continue;
+    let end = tags.lastIndex;
+    if (!isImage && !/\/\s*>$/.test(tag)) {
+      // Skip the complete math node, including a rendered fallback nested inside it.
+      const boundaries = new RegExp(`<(/?)${match[1]}\\b(?:[^>"']|"[^"]*"|'[^']*')*>`, 'gi');
+      boundaries.lastIndex = end;
+      let depth = 1, boundary: RegExpExecArray | null;
+      while ((boundary = boundaries.exec(source))) {
+        depth += boundary[1] ? -1 : /\/\s*>$/.test(boundary[0]) ? 0 : 1;
+        if (!depth) { end = boundaries.lastIndex; break; }
+      }
+      if (depth) continue;
+    }
+    const tex = formula.trim();
+    const delimited = /^(?:\$|\\[[(]|\\begin\{)/.test(tex) ? tex : tex.includes('\n') ? `\\[${tex}\\]` : `$${tex}$`;
+    result += source.slice(offset, match.index) + protect(delimited);
+    offset = end;
+    tags.lastIndex = end;
+  }
+  return result + source.slice(offset);
+}
+
 export function plainText(value: unknown, preserveFormatting = false): string {
   if (typeof value !== 'string') return '';
   const input = value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
@@ -74,20 +123,18 @@ export function plainText(value: unknown, preserveFormatting = false): string {
     return `${marker}${literals.length - 1}\uE001`;
   };
   const restore = (text: string) => text.replace(new RegExp(`${marker}(\\d+)\uE001`, 'g'), (_, index: string) => literals[Number(index)]);
-  const protectedValue = input.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1|(`+)[^\n]*?\2|(?<!\\)\$\$[\s\S]*?(?<!\\)\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|(?<!\\)\$(?!\$)(?:\\.|[^$\\\n])+?(?<!\\)\$/g, protect);
+  let protectedValue = '', cursor = 0;
+  for (const span of sourceLiterals(input)) {
+    const literal = input.slice(span.start, span.end);
+    protectedValue += input.slice(cursor, span.start) + protect(span.kind === 'math' ? decodeEntities(literal) : literal);
+    cursor = span.end;
+  }
+  protectedValue += input.slice(cursor);
   let text = protectedValue
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
-      // Zhihu equation images carry source TeX in alt; do not infer missing formulae.
-      if (!/\b(?:class\s*=\s*["'][^"']*\bztext-math\b|eeimg\s*=)/i.test(tag)) return '';
-      const alt = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
-      const formula = alt?.[1] ?? alt?.[2];
-      if (!formula) return '';
-      const source = decodeEntities(restore(formula));
-      return protect(/^(?:\$|\\[[(])/.test(source) ? source : `$${source}$`);
-    })
+    .replace(/<!--[\s\S]*?-->/g, '');
+  text = equationMarkup(text, protect, restore)
     .replace(/<(?:br\s*\/?|\/p|\/div|\/li)>/gi, '\n')
     .replace(/<\/?[a-z][\w:-]*(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi, '');
   text = decodeEntities(text);
@@ -131,6 +178,10 @@ function normalizedTitle(value: string): string {
 }
 function paragraphs(value: string): string[] {
   const lines = value.split('\n');
+  const offsets: number[] = [];
+  let position = 0;
+  for (const line of lines) { offsets.push(position); position += line.length + 1; }
+  const literals = sourceLiterals(value);
   const output: string[] = [];
   const listItem = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])\s+/;
   const indented = /^(?: {4}|\t)/;
@@ -139,17 +190,14 @@ function paragraphs(value: string): string[] {
     if (!line.trim()) { index++; continue; }
     let end = index + 1;
     const fence = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
-    const dollar = /(?<!\\)\$\$/.exec(line);
-    const bracket = line.indexOf('\\[');
-    const mathEnd = dollar && !/(?<!\\)\$\$/.test(line.slice(dollar.index + 2)) ? '$$'
-      : bracket >= 0 && !line.slice(bracket + 2).includes('\\]') ? '\\]' : undefined;
+    const lineEnd = offsets[index] + line.length;
+    const multiline = literals.find(span => span.start >= offsets[index] && span.start <= lineEnd && span.end > lineEnd);
     if (fence) {
       const close = new RegExp(`^[ \\t]{0,3}${fence[0]}{${fence.length},}[ \\t]*$`);
       while (end < lines.length && !close.test(lines[end])) end++;
       if (end < lines.length) end++;
-    } else if (mathEnd) {
-      while (end < lines.length && !(mathEnd === '$$' ? /(?<!\\)\$\$/.test(lines[end]) : lines[end].includes(mathEnd))) end++;
-      if (end < lines.length) end++;
+    } else if (multiline) {
+      while (end < lines.length && offsets[end] < multiline.end) end++;
     } else if (listItem.test(line) || /^[ \t]{0,3}>/.test(line)) {
       // Keep a Markdown list/quote and its lazy continuation lines together.
       while (end < lines.length) {
@@ -164,6 +212,13 @@ function paragraphs(value: string): string[] {
     } else if (line.includes('|') && /^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$/.test(lines[end] ?? '')) {
       end++;
       while (end < lines.length && lines[end].includes('|') && lines[end].trim()) end++;
+    }
+    // A list/quote may contain a formula with blank lines. Its closing delimiter
+    // belongs to the same source paragraph even if prose block rules stop early.
+    let crossing = literals.find(span => span.start < (offsets[end] ?? value.length) && span.end > (offsets[end] ?? value.length));
+    while (crossing) {
+      while (end < lines.length && offsets[end] < crossing.end) end++;
+      crossing = literals.find(span => span.start < (offsets[end] ?? value.length) && span.end > (offsets[end] ?? value.length));
     }
     const part = lines.slice(index, end).join('\n');
     output.push(end > index + 1 || indented.test(line) ? part : part.trim());
@@ -195,13 +250,19 @@ function answerHeadline(answer: Answer, query: string): string {
       - (/大家好|谢邀|感谢邀请|关注我|公众号|我是/.test(highlight.text) ? 1 : 0),
   })).sort((a, b) => b.score - a.score);
   const quote = candidates[0]?.text || answer.paragraphs[0] || answer.title;
-  const firstSentence = quote.match(/^[\s\S]*?[。！？](?:\s|$)/)?.[0].trim() || quote;
-  return firstSentence.length > 60 ? `${firstSentence.slice(0, 60)}…` : firstSentence;
+  const literals = sourceLiterals(quote);
+  const sentenceEnd = [...quote.matchAll(/[。！？](?:\s|$)/g)]
+    .find(match => !literals.some(span => span.start <= match.index! && span.end > match.index!));
+  const firstSentence = sentenceEnd ? quote.slice(0, sentenceEnd.index! + sentenceEnd[0].length).trim() : quote;
+  const prefix = sourcePrefix(firstSentence, 60, 400);
+  // Extremely long formulae stay in the reader; use the actual question title
+  // when no complete source prefix fits in a readable label.
+  return prefix ? `${prefix}${prefix.length < firstSentence.length ? '…' : ''}` : answer.title;
 }
 
 function searchIdentity(item: SearchItem) {
   if (!item || typeof item !== 'object') return undefined;
-  const title = sourceTitle(item.Title).slice(0, 400);
+  const title = sourcePrefix(sourceTitle(item.Title), 400);
   const url = safeZhihuUrl(item.Url);
   const type = String(item.ContentType ?? '').toLowerCase();
   if (!title || !url || !['answer', 'question', 'article'].includes(type)) return undefined;
@@ -238,12 +299,12 @@ export function adaptSearch(items: SearchItem[], query: string): Question[] {
     const knownIds = titleIds.get(normalizedTitle(title));
     const questionId = record.questionId ?? (knownIds?.size === 1 ? [...knownIds][0] : undefined);
     const id = type === 'article' ? `article-${contentId ?? idHash(url)}` : questionId ? `question-${questionId}` : `title-${idHash(normalizedTitle(title))}`;
-    const content = plainText(item.ContentText, true).slice(0, 12000);
+    const content = sourcePrefix(plainText(item.ContentText, true), 12000);
     const lexical = matchScore(title, content, terms);
     const relevance = Math.min(1, Math.max(0.3, 0.45 + lexical * 0.4 + (1 - index / 10) * 0.15));
     let question = groups.get(id);
     if (!question) {
-      question = { id, title, excerpt: content.slice(0, 180), keywords: extractKeywords(title).slice(0, 4), relevance, color: PALETTE[groups.size % PALETTE.length], answers: [], url: questionId && type !== 'article' ? `https://www.zhihu.com/question/${questionId}` : url, kind: type === 'article' ? 'article' : 'question', answersExpanded: type === 'article' };
+      question = { id, title, excerpt: sourcePrefix(content, 180, 600), keywords: extractKeywords(title).slice(0, 4), relevance, color: PALETTE[groups.size % PALETTE.length], answers: [], url: questionId && type !== 'article' ? `https://www.zhihu.com/question/${questionId}` : url, kind: type === 'article' ? 'article' : 'question', answersExpanded: type === 'article' };
       groups.set(id, question);
     }
     question.relevance = Math.max(question.relevance, relevance);
@@ -255,7 +316,7 @@ export function adaptSearch(items: SearchItem[], query: string): Question[] {
       id: answerId,
       title,
       author: plainText(item.AuthorName).slice(0, 100) || '作者未提供',
-      excerpt: content.slice(0, 220),
+      excerpt: sourcePrefix(content, 220, 600),
       paragraphs: split,
       url,
       relevance,
@@ -270,15 +331,15 @@ export function adaptSearch(items: SearchItem[], query: string): Question[] {
 }
 
 export function adaptPublicAnswer(item: PublicItem, detail?: PublicDetail, query = ''): Answer {
-  const title = plainText(detail?.chapter_name || item.title).slice(0, 400) || '未提供标题';
-  const content = plainText(detail?.content, true).slice(0, 20000);
+  const title = sourcePrefix(plainText(detail?.chapter_name || item.title), 400) || '未提供标题';
+  const content = sourcePrefix(plainText(detail?.content, true), 20000);
   const intro = plainText(detail?.introduction || item.description, true);
   return withHighlights({
     id: `knowledge-${item.work_id}`,
     workId: item.work_id,
     title,
     author: plainText(detail?.author_name).slice(0, 100) || '作者未提供',
-    excerpt: (intro || content).slice(0, 220),
+    excerpt: sourcePrefix(intro || content, 220, 600),
     paragraphs: paragraphs(content || intro),
     url: `${PUBLIC_BASE}/${encodeURIComponent(item.work_id)}`,
     relevance: 0.7,

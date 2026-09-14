@@ -14,7 +14,7 @@ const normal = new THREE.Vector3(0, 0, -1);
 const pose = (progress: number, index = 0, count = 6) =>
   sampleCollapse({ position, target, normal, progress, index, count });
 
-test("tidal infall preserves its source, accelerates, and closes exactly at the horizon", () => {
+test("tidal infall preserves its source, accelerates directly inward, and closes exactly at the horizon", () => {
   assert.ok(pose(0).position.distanceTo(position) < 1e-10);
   assert.deepEqual(pose(0).scale.toArray(), [1, 1, 1]);
   assert.ok(pose(0).rotation.angleTo(new THREE.Quaternion()) < 1e-10);
@@ -26,7 +26,18 @@ test("tidal infall preserves its source, accelerates, and closes exactly at the 
   }
   const speed = (p: number) => pose(p + 0.005).position.distanceTo(pose(p).position);
   assert.ok(speed(0.4) > speed(0.1) * 2, "infall accelerates before capture");
-  assert.ok(pose(0.55).scale.x > pose(0.55).scale.y * 2, "a narrow tidal major axis forms");
+  assert.equal(pose(0.44).opacity, 0, "whole bodies dissolve before the main infall");
+  assert.ok(pose(0.15).opacity > 0.5 && pose(0.15).opacity < 1, "the visible source gradually gives way to stellar fragments");
+  for (const p of [0.12, 0.25, 0.5, 0.8]) {
+    const sample = sampleCollapse({ position, target, normal, orientation: new THREE.Quaternion().setFromEuler(new THREE.Euler(1, 0.3, -2)), progress: p, index: 0, count: 1 });
+    assert.deepEqual(sample.rotation.toArray(), [0, 0, 0, 1], "an intact galaxy never turns sideways before entry");
+    assert.equal(sample.scale.x, sample.scale.y, "the intact model is not stretched into a flat ribbon");
+  }
+  const direct = target.clone().sub(position).normalize();
+  for (const p of [0.1, 0.3, 0.6]) {
+    const direction = pose(p).position.clone().sub(position).normalize();
+    assert.ok(direction.distanceTo(direct) < 1e-10, "early motion is straight toward the eye");
+  }
   assert.ok(pose(0.97).position.distanceTo(target) < position.distanceTo(target) * 0.09);
   assert.ok(pose(0.5, 5).progress < pose(0.5, 0).progress, "galaxies start in a small cascade");
   assert.deepEqual(position.toArray(), [-135, -58, 12], "saved source transforms stay immutable");
@@ -42,6 +53,13 @@ test("collapse remains bounded through oblique views, degenerate targets and inv
         assert.ok(sample.opacity >= 0 && sample.opacity <= 1);
         assert.ok(sample.scale.toArray().every((value) => value >= 0 && value <= 2.65));
         assert.ok(Math.abs(sample.rotation.length() - 1) < 1e-8);
+      }
+      let previousDistance = source.distanceTo(target);
+      for (let index = 0; index <= 250; index++) {
+        const sample = sampleCollapse({ position: source, target, normal: direction, progress: index / 250, index: 0, count: 1 });
+        const distance = sample.position.distanceTo(target);
+        assert.ok(distance <= previousDistance + 1e-8, "every trajectory moves monotonically inward, including the late curl");
+        previousDistance = distance;
       }
     }
   }
@@ -91,10 +109,11 @@ test("mobile and desktop transitions use four bounded batches and all uploaded a
       assert.equal(effect.group.children.length, 4);
       assert.equal(effect.group.visible, false);
       const particles = effect.group.getObjectByName("tidal-stellar-fragments") as THREE.Points;
-      assert.equal(particles.geometry.getAttribute("position").count, mobile ? 660 : 1560);
+      assert.equal(particles.geometry.getAttribute("position").count, mobile ? 1980 : 4680);
       for (const phase of ["collapse", "birth"] as const) {
         for (const p of [0, 0.08, 0.2, 0.4, 0.7, 0.93, 1, NaN]) {
           effect.update(frame(phase, p));
+          assert.equal(particles.geometry.drawRange.count, (mobile ? 660 : 1560) * (phase === "collapse" ? 3 : 1), "birth retains its previous particle budget");
           effect.group.traverse((object) => {
             assert.equal(object.userData.decoration, true);
             if (!(object instanceof THREE.Mesh || object instanceof THREE.Points)) return;
@@ -105,7 +124,7 @@ test("mobile and desktop transitions use four bounded batches and all uploaded a
         }
       }
       const mesh = effect.group.getObjectByName("tidal-accretion-silk") as THREE.Mesh;
-      assert.ok(mesh.geometry.getAttribute("position").count <= (mobile ? 1600 : 9200));
+      assert.ok(mesh.geometry.getAttribute("position").count <= (mobile ? 3120 : 13680));
       effect.update(frame("collapse", 1));
       const intensities = particles.geometry.getAttribute("intensity");
       assert.ok(Array.from(intensities.array).every((alpha) => alpha === 0));
@@ -134,6 +153,52 @@ test("waiting keeps only the accretion glow and does not upload fresh particle b
     assert.equal(effect.group.visible, false);
     effect.update({ ...frame("collapse", 0.5), anchors: [] });
     assert.equal(particles.visible, false);
+  } finally {
+    effect.dispose();
+  }
+});
+
+test("dissociation starts on the preserved galaxy geometry and releases grains in a continuous accelerating flow", () => {
+  const effect = createSearchTransition({ mobile: true });
+  const sourcePositions = new Float32Array([-145, -62, 12, -125, -59, 14, -136, -43, 8]);
+  const sourceColors = new Float32Array([0.2, 0.6, 1, 0.9, 0.3, 0.6, 1, 0.8, 0.4]);
+  const savedPositions = sourcePositions.slice();
+  const savedColors = sourceColors.slice();
+  const input = {
+    ...frame("collapse", 0),
+    anchors: [{ id: "sampled-arms", position, fragmentPositions: sourcePositions, fragmentColors: sourceColors }],
+  };
+  const particles = effect.group.getObjectByName("tidal-stellar-fragments") as THREE.Points;
+  const positions = particles.geometry.getAttribute("position");
+  const colors = particles.geometry.getAttribute("color");
+  const intensities = particles.geometry.getAttribute("intensity");
+  const point = new THREE.Vector3();
+  try {
+    effect.update(input);
+    for (let index = 0; index < 660; index++) {
+      const sample = index % 3;
+      assert.deepEqual(Array.from(positions.array.slice(index * 3, index * 3 + 3)), Array.from(sourcePositions.slice(sample * 3, sample * 3 + 3)));
+      assert.deepEqual(Array.from(colors.array.slice(index * 3, index * 3 + 3)), Array.from(sourceColors.slice(sample * 3, sample * 3 + 3)));
+    }
+    const previous = new Float64Array(positions.count);
+    for (let index = 0; index < positions.count; index++) previous[index] = point.fromBufferAttribute(positions, index).distanceTo(target);
+    for (let step = 1; step <= 70; step++) {
+      effect.update({ ...input, progress: step / 70 });
+      for (let index = 0; index < positions.count; index++) {
+        const distance = point.fromBufferAttribute(positions, index).distanceTo(target);
+        assert.ok(distance <= previous[index] + 0.00005, "source grains and their trailing glints never drift away from capture");
+        previous[index] = distance;
+      }
+    }
+    effect.update({ ...input, progress: 0.44 });
+    assert.equal(pose(0.44).opacity, 0);
+    assert.ok(intensities.getX(0) > 0.4, "fragments remain luminous after the original galaxy has fully dissolved");
+    const forwardGrain = point.fromBufferAttribute(positions, 0).distanceTo(target);
+    const trailingGrain = point.fromBufferAttribute(positions, 660).distanceTo(target);
+    assert.ok(trailingGrain > forwardGrain, "a dim trailing glint follows each moving grain");
+    assert.ok(intensities.getX(0) > intensities.getX(660));
+    assert.deepEqual(sourcePositions, savedPositions);
+    assert.deepEqual(sourceColors, savedColors);
   } finally {
     effect.dispose();
   }

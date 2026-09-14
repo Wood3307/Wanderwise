@@ -247,3 +247,38 @@ test('large sources send a bounded shortlist, preserving original paragraph indi
   assert.equal(result.method, 'model');
   exactSource(result, large);
 });
+
+test('a rich passage stays whole while oversized surrounding prose and equations remain bounded', () => {
+  const formula = '$' + Array.from({ length: 30 }, (_, index) => `\\frac{a_{${index}}}{b_{${index}}}`).join(' + ') + '$';
+  assert.ok(formula.length > 240 && formula.length < 1600);
+  const paragraph = article.paragraphs[2].repeat(50) + formula + article.paragraphs[4].repeat(50);
+  const answer = { ...article, paragraphs: [paragraph] };
+  const result = extractHighlights(answer, '公式');
+  assert.ok(result.some(quote => quote.text === formula));
+  assert.ok(result.every(quote => quote.text.length <= 1600 && paragraph.includes(quote.text)));
+  assert.ok(result.filter(quote => quote.text.includes('\\frac')).every(quote => quote.text === formula));
+
+  const hugeFormula = '$$' + 'x + '.repeat(1000) + 'y$$';
+  const huge = { ...article, paragraphs: [hugeFormula, article.paragraphs[3]] };
+  const selected = extractHighlights(huge, '记忆');
+  assert.ok(selected.length > 0);
+  assert.ok(selected.every(quote => quote.paragraphIndex === 1));
+  assert.equal(huge.paragraphs[0], hugeFormula, 'the original reader paragraph is not rewritten or removed');
+});
+
+test('model candidate budget includes whole rich excerpts and returned indices still identify exact source', async () => {
+  const answer = { ...article, paragraphs: Array.from({ length: 20 }, (_, index) =>
+    '$$\n\\begin{aligned}\n' + Array.from({ length: 24 }, (_, row) => `x_{${index},${row}} &= \\frac{a_${row}+b_${row}}{c_${row}} \\\\`).join('\n') + '\n\\end{aligned}\n$$') };
+  let submitted: { paragraphIndex: number; text: string }[] = [];
+  const service = new HighlightService({ env: configured, fetchImpl: async (_, init) => {
+    submitted = sourceData(JSON.parse(String(init?.body)).messages[1]).paragraphs;
+    assert.ok(submitted.length >= 4 && submitted.length <= 48);
+    assert.ok(submitted.reduce((total, paragraph) => total + paragraph.text.length, 0) <= 12_000);
+    assert.ok(submitted.every(paragraph => paragraph.text.length <= 1600 && paragraph.text === answer.paragraphs[paragraph.paragraphIndex]));
+    return json(completion(submitted.slice(0, 4).map(paragraph => paragraph.paragraphIndex)));
+  } });
+  const result = await service.enrich(answer, '公式');
+  assert.equal(result.method, 'model');
+  assert.equal(result.highlights.length, 4);
+  assert.ok(result.highlights.every(quote => quote.text === answer.paragraphs[quote.paragraphIndex] && quote.text.length <= 1600));
+});

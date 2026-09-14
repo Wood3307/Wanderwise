@@ -717,7 +717,7 @@ button svg {
   border: 1px solid transparent;
   border-radius: 0;
   line-height: 2.15;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 350;
   letter-spacing: 0.4px;
   color: #d4e3e9;
@@ -1775,7 +1775,7 @@ button svg {
     margin-bottom: 17px;
   }
   .reader-paragraph {
-    font-size: 14px;
+    font-size: 15px;
     line-height: 2.15;
     padding: 11px 10px;
   }

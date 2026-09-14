@@ -20,40 +20,108 @@ function escapedAt(source: string, index: number): boolean {
   return count % 2 === 1;
 }
 
-// Runs before Markdown's backslash escaping, and after code spans have claimed
-// their content. Dollar math requires a non-currency expression; explicit TeX
-// delimiters remain available for numeric-only mathematics.
-markdown.inline.ruler.before('escape', 'celestial_math', (state, silent) => {
-  const start = state.pos, source = state.src;
+const maxMathLength = 4000;
+const mathEnvironment = /^\\begin\{((?:align(?:ed|at)?|alignedat|gather(?:ed)?|equation|[pbBvV]?matrix|smallmatrix|cases|array|darray|split|subarray|CD)\*?)\}/;
+
+interface MathMatch { expression: string; display: boolean; end: number; markup: string }
+function matchMath(source: string, start: number, limit = source.length): MathMatch | undefined {
+  if (escapedAt(source, start)) return;
+  const environment = source.slice(start, start + 32).match(mathEnvironment);
+  if (environment) {
+    const opening = environment[0], closing = `\\end{${environment[1]}}`;
+    let cursor = start + opening.length, depth = 1;
+    while (cursor < limit && cursor - start <= maxMathLength) {
+      const end = source.indexOf(closing, cursor);
+      if (end < 0 || end + closing.length > limit) return;
+      const nested = source.indexOf(opening, cursor);
+      if (nested >= 0 && nested < end && !escapedAt(source, nested)) {
+        depth++; cursor = nested + opening.length; continue;
+      }
+      cursor = end + closing.length;
+      if (!escapedAt(source, end) && --depth === 0) {
+        const expression = source.slice(start, cursor);
+        return expression.length <= maxMathLength
+          ? { expression, display: true, end: cursor, markup: opening } : undefined;
+      }
+    }
+    return;
+  }
   const opening = source.startsWith('\\(', start) ? '\\('
     : source.startsWith('\\[', start) ? '\\['
       : source.startsWith('$$', start) ? '$$'
         : source[start] === '$' ? '$' : '';
-  if (!opening || escapedAt(source, start)) return false;
+  if (!opening) return;
   const closing = opening === '\\(' ? '\\)' : opening === '\\[' ? '\\]' : opening;
   const display = opening === '$$' || opening === '\\[';
   const from = start + opening.length;
-  if (opening === '$' && (/\s/.test(source[from] ?? '') || source[start - 1] === '$')) return false;
+  if (opening === '$' && source[start - 1] === '$') return;
   let end = source.indexOf(closing, from);
   while (end >= 0 && escapedAt(source, end)) end = source.indexOf(closing, end + closing.length);
-  if (end < 0 || end >= state.posMax) return false;
+  if (end < 0 || end + closing.length > limit) return;
   const expression = source.slice(from, end);
-  if (!expression.trim() || expression.length > 4000) return false;
+  if (!expression.trim() || expression.length > maxMathLength) return;
   if (opening === '$') {
-    // Do not turn "$20 and $30", "$12.50$", escaped prices, or ordinary
-    // Chinese prose between currency symbols into equations.
-    if (/\s/.test(source[end - 1] ?? '') || /\d/.test(source[end + 1] ?? '')
+    // Keep ordinary prices literal while accepting numeric mathematics and
+    // padding inside explicitly paired delimiters (e.g. $2$, $ x_i $).
+    if (/\d/.test(source[end + 1] ?? '')
       || expression.includes('\n') || /[\u3400-\u9fff]/u.test(expression.replace(/\\text\{[^}]*\}/g, ''))
-      || /^[\d\s,.+-]+$/.test(expression)
-      || !/[A-Za-z\\^_=+*/<>\u03b1-\u03c9]/u.test(expression)) return false;
+      || !/[\dA-Za-z\\^_=+*/<>\u03b1-\u03c9]/u.test(expression)) return;
   }
+  return { expression, display, end: end + closing.length, markup: opening };
+}
+
+// Claim whole display formulas before Markdown can split them at an empty line
+// or interpret aligned rows, underscores, and asterisks as Markdown syntax.
+// Indented code and enclosing code fences retain Markdown's normal precedence.
+markdown.block.ruler.before('fence', 'celestial_math_block', (state, startLine, endLine, silent) => {
+  if (state.sCount[startLine] - state.blkIndent >= 4) return false;
+  const start = state.bMarks[startLine] + state.tShift[startLine];
+  if (!/^(?:\$\$|\\\[|\\begin\{)/.test(state.src.slice(start, start + 8))) return false;
+  let content = '';
+  for (let line = startLine; line < endLine && content.length <= maxMathLength + 64; line++) {
+    if (line > startLine && !state.isEmpty(line) && state.sCount[line] < state.blkIndent) break;
+    content = state.getLines(startLine, line + 1, state.blkIndent, false).trimStart();
+    const matched = matchMath(content, 0);
+    if (!matched) continue;
+    // Inline prose following the closing delimiter belongs to the inline rule.
+    if (content.slice(matched.end).trim()) return false;
+    if (silent) return true;
+    const token = state.push('math_display', 'math', 0);
+    token.content = matched.expression;
+    token.markup = matched.markup;
+    token.map = [startLine, line + 1];
+    state.line = line + 1;
+    return true;
+  }
+  return false;
+}, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+
+// Runs before backslash escaping; code spans still consume their entire source
+// at their opening backtick, so equations inside ordinary code remain literal.
+markdown.inline.ruler.before('escape', 'celestial_math', (state, silent) => {
+  const matched = matchMath(state.src, state.pos, state.posMax);
+  if (!matched) return false;
   if (!silent) {
-    const token = state.push(display ? 'math_display' : 'math_inline', 'math', 0);
-    token.content = expression;
-    token.markup = opening;
+    const token = state.push(matched.display ? 'math_display' : 'math_inline', 'math', 0);
+    token.content = matched.expression;
+    token.markup = matched.markup;
   }
-  state.pos = end + closing.length;
+  state.pos = matched.end;
   return true;
+});
+
+// A fence explicitly labelled math/latex is a formula; all other languages,
+// including unlabelled fences, remain code with no interpretation of TeX.
+markdown.core.ruler.after('block', 'celestial_math_fence', state => {
+  for (const token of state.tokens) {
+    if (token.type !== 'fence' || !/^(?:math|latex)$/i.test(token.info.trim())
+      || !token.content.trim() || token.content.length > maxMathLength) continue;
+    const expression = token.content.trim();
+    const matched = matchMath(expression, 0);
+    token.type = 'math_display';
+    token.tag = 'math';
+    token.content = matched?.end === expression.length ? matched.expression : expression;
+  }
 });
 
 export interface ParsedRichText { tokens: Token[]; rich: boolean }

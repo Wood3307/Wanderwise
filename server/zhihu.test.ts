@@ -5,6 +5,8 @@ import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { adaptPublic, adaptSearch, ApiError, extractKeywords, loadSnapshot, plainText, safeZhihuUrl, validWorkId, ZhihuService } from './zhihu.js';
 import type { PublicSnapshot, SearchItem } from './zhihu.js';
+import { parseRichText } from '../src/lib/rich-text.js';
+import katex from 'katex';
 
 const snapshot: PublicSnapshot = {
   fetchedAt: '2026-09-13T00:00:00.000Z',
@@ -122,6 +124,91 @@ test('HTTP search delivers intact rich source blocks to the reader and highlight
   for (const quote of selected.highlights) {
     assert.ok(answer.paragraphs[quote.paragraphIndex].includes(quote.text));
     assert.ok(content.includes(quote.text));
+  }
+});
+
+test('adapter-to-highlight math survives multi-line environments, blank lines and explicit LaTeX fences', () => {
+  const aligned = '\\begin{aligned}\n'
+    + Array.from({ length: 12 }, (_, index) => `x_{${index}} &= \\frac{a_{${index}} + b_{${index}}}{c_{${index}}} \\\\`).join('\n\n')
+    + '\n\\end{aligned}';
+  for (const formula of [`$$\n${aligned}\n$$`, `\\[\n${aligned}\n\\]`, aligned, `\`\`\`latex\n${aligned}\n\`\`\``]) {
+    assert.ok(formula.length > 240);
+    const answers = [
+      adaptSearch([{ ...answerItem, ContentText: formula }], '')[0].answers[0],
+      adaptPublic({ ...snapshot, details: { '123': { ...snapshot.details['123'], content: formula } } }, '')[0].answers[0],
+    ];
+    for (const answer of answers) {
+      assert.deepEqual(answer.paragraphs, [formula]);
+      assert.deepEqual(answer.highlights!.map(quote => quote.text), [formula]);
+      assert.equal(answer.highlights![0].paragraphIndex, 0);
+      const parsed = parseRichText(answer.highlights![0].text);
+      const math = parsed.tokens.flatMap(token => token.children ?? [token]).filter(token => token.type === 'math_display');
+      assert.equal(math.length, 1);
+      assert.match(katex.renderToString(math[0].content, { displayMode: true, throwOnError: true, trust: false }), /class="katex/);
+    }
+  }
+  const inline = '计算得到 \\(\n\\frac{a}{b}\n\\) 并解释每一个变量的含义。';
+  const answer = adaptSearch([{ ...answerItem, ContentText: inline }], '')[0].answers[0];
+  assert.deepEqual(answer.paragraphs, [inline]);
+  assert.equal(answer.highlights![0].text, inline);
+  assert.ok(parseRichText(answer.highlights![0].text).tokens.some(token => token.children?.some(child => child.type === 'math_inline')));
+});
+
+test('equation source attributes and approved Zhihu equation URLs are restored without fetching images', () => {
+  const content = '<p>比较：$a &lt; b$；代码：`$a &lt; b$`。</p>'
+    + '<p>网址公式：<img src="https://www.zhihu.com/equation?tex=%5Cfrac%7Ba%2Bb%7D%7Bc%7D&amp;preview=true">。</p>'
+    + '<p>延迟图片：<img data-src="/equation?tex=E%3Dmc%5E2">。</p>'
+    + '<p>属性公式：<span data-tex="x &lt; y"><span>rendered fallback</span></span>。</p>'
+    + '<p>公式图片：<img data-latex="\\sqrt{x}">。</p>';
+  const answer = adaptSearch([{ ...answerItem, ContentText: content }], '')[0].answers[0];
+  assert.deepEqual(answer.paragraphs, [
+    '比较：$a < b$；代码：`$a &lt; b$`。',
+    '网址公式：$\\frac{a+b}{c}$。',
+    '延迟图片：$E=mc^2$。',
+    '属性公式：$x < y$。',
+    '公式图片：$\\sqrt{x}$。',
+  ]);
+  assert.ok(!JSON.stringify(answer).includes('rendered fallback'));
+  const math = parseRichText(answer.paragraphs[0]).tokens.flatMap(token => token.children ?? []).find(token => token.type === 'math_inline');
+  assert.ok(math);
+  assert.doesNotThrow(() => katex.renderToString(math.content, { throwOnError: true, trust: false }));
+  for (const url of ['https://evil.test/equation?tex=E', 'https://www.zhihu.com.evil.test/equation?tex=E', 'https://user:pass@www.zhihu.com/equation?tex=E', 'https://www.zhihu.com:8443/equation?tex=E', 'javascript:alert(1)', 'https://www.zhihu.com/redirect?tex=E']) {
+    assert.equal(plainText(`<p>原文<img src="${url}">保持。</p>`), '原文保持。');
+  }
+  assert.equal(plainText('<p>原文<img alt="not source TeX" src="https://example.test/image.png">保持。</p>'), '原文保持。');
+});
+
+test('answer labels and summaries finish source formulas instead of cutting TeX commands', () => {
+  const formula = '$\\int_{-\\infty}^{+\\infty} e^{-x^2} \\, dx = \\sqrt{\\pi}$';
+  const content = `需要先明确核心的计算公式：${formula}。结论用于解释高斯积分的计算方法。`;
+  const answer = adaptSearch([{ ...answerItem, ContentText: content }], '')[0].answers[0];
+  assert.ok(answer.title.includes(formula));
+  assert.ok(answer.title.length <= 400);
+  assert.ok(answer.highlights!.every(quote => answer.paragraphs[quote.paragraphIndex].includes(quote.text)));
+  const long = '说明'.repeat(85) + formula + '。之后的分析同样来自原文。';
+  const question = adaptSearch([{ ...answerItem, ContentText: long }], '')[0];
+  assert.ok(question.excerpt.includes(formula));
+  assert.ok(question.answers[0].excerpt.includes(formula));
+  assert.ok(long.startsWith(question.excerpt));
+  assert.ok(long.startsWith(question.answers[0].excerpt));
+  const publicAnswer = adaptPublic({ ...snapshot, details: { '123': { ...snapshot.details['123'], content: long, introduction: long } } }, '')[0].answers[0];
+  assert.ok(publicAnswer.excerpt.includes(formula));
+  assert.ok(long.startsWith(publicAnswer.excerpt));
+  const huge = '$$' + 'x + '.repeat(400) + 'y$$';
+  const hugeAnswer = adaptSearch([{ ...answerItem, ContentText: huge }], '')[0].answers[0];
+  assert.deepEqual(hugeAnswer.paragraphs, [huge]);
+  assert.equal(hugeAnswer.title, answerItem.Title);
+  assert.equal(hugeAnswer.excerpt, '');
+  assert.deepEqual(hugeAnswer.highlights, []);
+
+  for (const [limit, fromPublic] of [[12000, false], [20000, true]] as const) {
+    const prefix = '文'.repeat(limit - 10);
+    const boundary = prefix + formula;
+    const limited = fromPublic
+      ? adaptPublic({ ...snapshot, details: { '123': { ...snapshot.details['123'], content: boundary } } }, '')[0].answers[0]
+      : adaptSearch([{ ...answerItem, ContentText: boundary }], '')[0].answers[0];
+    assert.deepEqual(limited.paragraphs, [prefix]);
+    assert.ok(limited.highlights!.every(quote => boundary.includes(quote.text)));
   }
 });
 

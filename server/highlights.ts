@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { Answer, ConnectionStatus, Highlight, HighlightResponse } from '../src/types.js';
+import { sourceLiterals } from './source-format.js';
 
 const MAX_HIGHLIGHTS = 6;
 const MAX_MODEL_CHARACTERS = 12_000;
 const MAX_MODEL_RESPONSE_BYTES = 64_000;
+// Rich quotes may be longer than prose, but never unbounded. Larger equations
+// remain intact in the reader instead of becoming broken excerpt fragments.
+const MAX_STRUCTURED_QUOTE = 1600;
 const STOP_WORDS = new Set('如何 怎么 怎样 为什么 什么 哪些 这个 那个 我们 你们 他们 一个 一些 可以 应该 需要 以及 还是 进行 通过 自己 时候 但是 就是 现在 有什么 有没有 怎么样 更好 起来 是否 不同 问题 话题 探索 发现 知识 因为 所以 因此 如果 那么 对于 关于 这样 这些 那些 已经 其实'.split(' '));
 const segmenter = new Intl.Segmenter('zh-CN', { granularity: 'word' });
 const sentences = new Intl.Segmenter('zh-CN', { granularity: 'sentence' });
@@ -22,7 +26,7 @@ function intersection(a: Set<string>, b: Set<string>): number {
   return count;
 }
 
-function chunks(paragraph: string): { text: string; offset: number }[] {
+function proseChunks(paragraph: string): { text: string; offset: number }[] {
   const trimmed = paragraph.trim();
   if (!trimmed) return [];
   if (trimmed.length <= 240) return [{ text: trimmed, offset: paragraph.indexOf(trimmed) }];
@@ -39,6 +43,25 @@ function chunks(paragraph: string): { text: string; offset: number }[] {
     }
     return output;
   });
+}
+
+function chunks(paragraph: string): { text: string; offset: number }[] {
+  const spans = sourceLiterals(paragraph);
+  if (!spans.length) return proseChunks(paragraph);
+  const trimmed = paragraph.trim();
+  if (trimmed.length <= MAX_STRUCTURED_QUOTE) return [{ text: trimmed, offset: paragraph.indexOf(trimmed) }];
+  const output: { text: string; offset: number }[] = [];
+  let cursor = 0;
+  const appendProse = (end: number) => {
+    output.push(...proseChunks(paragraph.slice(cursor, end)).map(chunk => ({ ...chunk, offset: cursor + chunk.offset })));
+  };
+  for (const span of spans) {
+    appendProse(span.start);
+    if (span.end - span.start <= MAX_STRUCTURED_QUOTE) output.push({ text: paragraph.slice(span.start, span.end), offset: span.start });
+    cursor = span.end;
+  }
+  appendProse(paragraph.length);
+  return output;
 }
 
 function rankCandidates(answer: Answer, query: string): Candidate[] {
